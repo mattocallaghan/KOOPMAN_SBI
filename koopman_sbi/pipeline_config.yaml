@@ -1,0 +1,28 @@
+# Pipeline Configuration for Koopman Teacher Training
+
+# Teacher Data Generation
+teacher:
+  num_samples: 100000          # Number of samples to generate from teacher model
+  num_context: 1000          # Number of context points to randomly select from dataset
+  batch_size: 1000          # Batch size for teacher data generation
+  use_teacher: true          # Whether to use teacher model (set to false for direct training)
+
+# Data Configuration
+data:
+  train_fraction: 0.8        # Fraction of teacher data to use for training
+  save_teacher_data: true    # Whether to save generated teacher data
+  load_existing_trajectories: false  # Whether to load existing saved trajectories
+  teacher_data_dir: null     # Will be set to logs/{task_name}/teacher_data
+
+# Training Configuration  
+training:
+  run_koopman_training: true # Whether to train Koopman model after data generation
+  run_evaluation: true       # Whether to run evaluation after training
+  compute_c2st: false         # Whether to compute C2ST scores (slow)
+  evaluation_only: false      # Skip trajectory generation and training, only evaluate
+
+# Model Paths (will be set automatically)
+paths:
+  flow_model_path: null      # Will be set to logs/{task_name}/flow_matching/models/best_model.pt
+  koopman_model_dir: null    # Will be set to logs/{task_name}/koopman/models
+  base_data_dir: null        # Will be set to logs/{task_name}/data
