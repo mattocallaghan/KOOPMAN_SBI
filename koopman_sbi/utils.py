@@ -16,6 +16,32 @@ import yaml
 from koopman_flow import KoopmanFlow
 
 
+def get_device():
+    """
+    Automatically detect and return the best available device.
+    Priority: CUDA > MPS > CPU
+
+    Note: MPS doesn't support float64, so we set default dtype to float32 when using MPS.
+
+    Returns:
+        str: Device string ('cuda', 'mps', or 'cpu')
+    """
+    if torch.cuda.is_available():
+        device = 'cuda'
+        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+    elif torch.backends.mps.is_available():
+        device = 'mps'
+        # MPS doesn't support float64, so we need to use float32
+        torch.set_default_dtype(torch.float32)
+        print("Using MPS (Apple Silicon) device")
+        print("Note: MPS doesn't support float64, setting default dtype to float32")
+    else:
+        device = 'cpu'
+        print("Using CPU device")
+
+    return device
+
+
 
 
 

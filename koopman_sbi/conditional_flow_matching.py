@@ -10,15 +10,33 @@ from torchdiffeq import odeint
 from nn import DenseResidualNet
 
 
+def _get_default_device():
+    """Get default device with priority: CUDA > MPS > CPU
+
+    Note: MPS doesn't support float64, sets default dtype to float32 when using MPS.
+    """
+    if torch.cuda.is_available():
+        return "cuda"
+    elif torch.backends.mps.is_available():
+        # MPS doesn't support float64, so we need to use float32
+        torch.set_default_dtype(torch.float32)
+        return "mps"
+    else:
+        return "cpu"
+
+
 class ConditionalFlowMatching(nn.Module):
     """Conditional Flow Matching model for learning posterior p(theta|x) in simulation based inference."""
-    
+
     def __init__(self, input_dim: int, context_dim: int,
-                 posterior_kwargs: dict = None, device: str = "cpu",
+                 posterior_kwargs: dict = None, device: str = None,
                  output_dir: str = "/logs"):
         super().__init__()
         self.input_dim = input_dim  # theta dimension
-        self.context_dim = context_dim  # x dimension  
+        self.context_dim = context_dim  # x dimension
+        # Auto-detect device if not specified (CUDA > MPS > CPU)
+        if device is None:
+            device = _get_default_device()
         self.device = torch.device(device)
         self.output_dir = output_dir
         
@@ -54,7 +72,12 @@ class ConditionalFlowMatching(nn.Module):
         self.scheduler_kwargs = {}
         self.optimizer = None
         self.scheduler = None
-        
+
+    def _to_device(self, tensor):
+        """Move tensor to model's device with appropriate dtype (float32 for MPS, keep original for others)"""
+        if self.device.type == 'mps' and tensor.dtype == torch.float64:
+            return tensor.to(self.device, dtype=torch.float32)
+        return tensor.to(self.device)
 
     def initialize_optimizer_and_scheduler(self):
         """Initialize optimizer and scheduler from kwargs."""
@@ -188,7 +211,7 @@ class ConditionalFlowMatching(nn.Module):
         total_losses = {'total_loss': 0.0, 'flow_matching_loss': 0.0}
         num_batches = 0
         for batch in train_loader:
-            theta, context = batch[0].to(self.device), batch[1].to(self.device)
+            theta, context = self._to_device(batch[0]), self._to_device(batch[1])
             self.optimizer.zero_grad()
             losses = self.compute_flow_matching_loss(theta, context)
             losses['total_loss'].backward()
@@ -211,10 +234,10 @@ class ConditionalFlowMatching(nn.Module):
         self.eval()
         total_loss = 0.0
         num_batches = 0
-        
+
         with torch.no_grad():
             for batch in validation_loader:
-                theta, context = batch[0].to(self.device), batch[1].to(self.device)
+                theta, context = self._to_device(batch[0]), self._to_device(batch[1])
                 losses = self.compute_flow_matching_loss(theta, context)
                 total_loss += losses['total_loss'].item()
                 num_batches += 1
@@ -302,8 +325,10 @@ class ConditionalFlowMatching(nn.Module):
         }, filepath)
     
     @classmethod
-    def load(cls, filepath: str, device: str = "cpu"):
-        """Load model from file."""
+    def load(cls, filepath: str, device: str = None):
+        """Load model from file. Auto-detects device if not specified (CUDA > MPS > CPU)."""
+        if device is None:
+            device = _get_default_device()
         checkpoint = torch.load(filepath, map_location=device)
         model = cls(
             input_dim=checkpoint['input_dim'],

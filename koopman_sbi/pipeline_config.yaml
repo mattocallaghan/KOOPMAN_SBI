@@ -3,7 +3,7 @@
 # Teacher Data Generation
 teacher:
   num_samples: 100000          # Number of samples to generate from teacher model
-  num_context: 1000          # Number of context points to randomly select from dataset
+  num_context: 100000          # Number of context points to randomly select from dataset
   batch_size: 1000          # Batch size for teacher data generation
   use_teacher: true          # Whether to use teacher model (set to false for direct training)
 
@@ -19,7 +19,7 @@ training:
   run_koopman_training: true # Whether to train Koopman model after data generation
   run_evaluation: true       # Whether to run evaluation after training
   compute_c2st: false         # Whether to compute C2ST scores (slow)
-  evaluation_only: false      # Skip trajectory generation and training, only evaluate
+  evaluation_only: true      # Skip trajectory generation and training, only evaluate
 
 # Model Paths (will be set automatically)
 paths:

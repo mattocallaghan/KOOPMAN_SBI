@@ -9,7 +9,14 @@ import numpy as np
 from sbi_dataset import generate_dataset, load_dataset
 from conditional_flow_matching import ConditionalFlowMatching
 from koopman_flow import KoopmanFlow
-from utils import evaluate_model
+from utils import evaluate_model, get_device
+
+
+def to_device(tensor, device):
+    """Move tensor to device with appropriate dtype (float32 for MPS, keep original for others)"""
+    if device == 'mps' and tensor.dtype == torch.float64:
+        return tensor.to(device, dtype=torch.float32)
+    return tensor.to(device)
 
 
 class KoopmanTeacherDataset(Dataset):
@@ -57,7 +64,7 @@ def generate_teacher_trajectories(teacher_model, context_data, pipeline_config, 
             
             # Sample random context from the provided context data
             context_indices = torch.randint(0, len(context_data), (current_batch_size,))
-            context_batch = context_data[context_indices].to(device)
+            context_batch = to_device(context_data[context_indices], device)
             
             # Sample random noise eps for each trajectory
             eps_batch = teacher_model.sample_theta_0(current_batch_size)  # theta_0 ~ N(0, I)
@@ -116,17 +123,20 @@ def main():
 
     args = parser.parse_args()
 
+    # Automatically detect best available device (CUDA > MPS > CPU)
+    device = get_device()
+
     # Load configurations
     with open(args.koopman_config, "r") as f:
         koopman_config = yaml.safe_load(f)
-    
+
     with open(args.flow_config, "r") as f:
         flow_config = yaml.safe_load(f)
-        
+
     with open(args.pipeline_config, "r") as f:
         pipeline_config = yaml.safe_load(f)
-    
-    
+
+
     # Set up paths
     dataset_name = koopman_config["task"]["name"]
     base_logs_dir = "logs"
@@ -142,21 +152,23 @@ def main():
     
     # Check if this is evaluation-only mode
     evaluation_only = pipeline_config["training"].get("evaluation_only", False)
-    
-    if evaluation_only:
-        print("Running in EVALUATION-ONLY mode - skipping trajectory generation and training")
-    else:
+    #TODO: Implement evaluation only case
+    try:
         # Load the trained flow matching model
         # this assumes that the teacher model was already trained and saved
+        
         flow_model_path = pipeline_config["paths"]["flow_model_path"]
         if not os.path.exists(flow_model_path):
             raise FileNotFoundError(f"Flow matching model not found at {flow_model_path}. Train it first using train_flow_matching.py!")
         
         print(f"Loading flow matching teacher model from: {flow_model_path}")
         teacher_model = ConditionalFlowMatching.load(
-            flow_model_path, 
-            device=flow_config["training"]["device"]
+            flow_model_path,
+            device=device
         )
+    except Exception as e:
+        #TODO: Implement training mode if needed
+        print(f"Error loading flow matching model: {e}")
     
     # Load the original dataset for evaluation and context (always needed)
     if os.path.exists(join(dataset_dir, "theta.npy")):
@@ -169,151 +181,162 @@ def main():
     else:
         raise FileNotFoundError(f"Dataset not found at {dataset_dir}. Generate it first using train_flow_matching.py!")
 
-    if not evaluation_only:
-        # Extract context data (x) from the dataset for trajectory generation
-        train_loader = DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False)
-        val_loader = DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=False)
-        
-        train_batch = next(iter(train_loader))
-        val_batch = next(iter(val_loader))
-        
-        # For flow matching dataset: (theta, x) pairs
-        train_context = train_batch[1]  # x values
-        val_context = val_batch[1]      # x values
-        all_context = torch.cat([train_context, val_context], dim=0)
-        
-        # Randomly select num_context points from all available context
-        num_context = pipeline_config["teacher"]["num_context"]
-        if num_context > len(all_context):
-            print(f"Warning: num_context ({num_context}) > available context ({len(all_context)}). Using all available.")
-            selected_context = all_context
-        else:
-            context_indices = torch.randperm(len(all_context))[:num_context]
-            selected_context = all_context[context_indices]
-        
-        print(f"Selected {len(selected_context)} context points from {len(all_context)} available")
-        
-        # Check if we should load existing trajectories or generate new ones
-        teacher_data_dir = pipeline_config["data"]["teacher_data_dir"]
-        
-        if pipeline_config["data"]["load_existing_trajectories"]:
-            # Load existing saved trajectories
-            try:
-                eps_teacher, theta_teacher, x_teacher = load_saved_trajectories(teacher_data_dir)
-            except FileNotFoundError as e:
-                print(f"Error: {e}")
-                print("Falling back to generating new trajectories...")
-                eps_teacher, theta_teacher, x_teacher = generate_teacher_trajectories(
-                    teacher_model, 
-                    selected_context, 
-                    pipeline_config,
-                    flow_config["training"]["device"]
-                )
-        else:
-            # Generate new teacher trajectories: (eps=theta_0, theta=theta_1, x=context)
+    # Currently always loads the dataset for evaluation purposes
+    # Extract context data (x) from the dataset for trajectory generation
+    train_loader = DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=False)
+    
+    train_batch = next(iter(train_loader))
+    val_batch = next(iter(val_loader))
+    
+    # For flow matching dataset: (theta, x) pairs
+    train_context = train_batch[1]  # x values
+    val_context = val_batch[1]      # x values
+    all_context = torch.cat([train_context, val_context], dim=0) # create a full context array
+    
+    # Randomly select num_context points from all available context
+    num_context = pipeline_config["teacher"]["num_context"]
+    if num_context > len(all_context):
+        print(f"Warning: num_context ({num_context}) > available context ({len(all_context)}). Using all available.")
+        selected_context = all_context
+    else:
+        context_indices = torch.randperm(len(all_context))[:num_context]
+        selected_context = all_context[context_indices]
+    
+    print(f"Selected {len(selected_context)} context points from {len(all_context)} available")
+    
+    #################################################################
+    #######§ Generate or load teacher trajectories ####################
+    #################################################################
+    # Check if we should load existing trajectories or generate new ones
+    teacher_data_dir = pipeline_config["data"]["teacher_data_dir"]
+    if pipeline_config["data"]["load_existing_trajectories"]:
+        # Load existing saved trajectories
+        try:
+            eps_teacher, theta_teacher, x_teacher = load_saved_trajectories(teacher_data_dir)
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            print("Falling back to generating new trajectories...")
             eps_teacher, theta_teacher, x_teacher = generate_teacher_trajectories(
-                teacher_model, 
-                selected_context, 
+                teacher_model,
+                selected_context,
                 pipeline_config,
-                flow_config["training"]["device"]
+                device
             )
-            
-        print(f"Generated teacher trajectories:")
-        print(f"  eps (theta_0) shape: {eps_teacher.shape}")
-        print(f"  theta (theta_1) shape: {theta_teacher.shape}")
-        print(f"  x (context) shape: {x_teacher.shape}")
+    else:
+        # Generate new teacher trajectories: (eps=theta_0, theta=theta_1, x=context)
+        eps_teacher, theta_teacher, x_teacher = generate_teacher_trajectories(
+            teacher_model,
+            selected_context,
+            pipeline_config,
+            device
+        )
         
-        # Save teacher data if requested
-        if pipeline_config["data"]["save_teacher_data"]:
-            os.makedirs(teacher_data_dir, exist_ok=True)
-            
-            np.save(join(teacher_data_dir, 'eps.npy'), eps_teacher.numpy())
-            np.save(join(teacher_data_dir, 'theta.npy'), theta_teacher.numpy())
-            np.save(join(teacher_data_dir, 'x.npy'), x_teacher.numpy())
-            print(f"Saved teacher data to: {teacher_data_dir}")
-        
-        # Split teacher data into train/val
-        num_samples = len(eps_teacher)
-        num_train = int(num_samples * pipeline_config["data"]["train_fraction"])
-        
-        indices = torch.randperm(num_samples)
-        train_indices = indices[:num_train]
-        val_indices = indices[num_train:]
-        
-        # Create subset datasets
-        train_eps = eps_teacher[train_indices]
-        train_theta = theta_teacher[train_indices]
-        train_x = x_teacher[train_indices]
-        
-        val_eps = eps_teacher[val_indices]
-        val_theta = theta_teacher[val_indices] 
-        val_x = x_teacher[val_indices]
-        
-        koopman_train_dataset = KoopmanTeacherDataset(train_eps, train_theta, train_x)
-        koopman_val_dataset = KoopmanTeacherDataset(val_eps, val_theta, val_x)
-        
-        print(f"Created Koopman datasets - Train: {len(koopman_train_dataset)}, Val: {len(koopman_val_dataset)}")
+    print(f"Teacher trajectories:")
+    print(f"  eps (theta_0) shape: {eps_teacher.shape}")
+    print(f"  theta (theta_1) shape: {theta_teacher.shape}")
+    print(f"  x (context) shape: {x_teacher.shape}")
     
-        # Train Koopman model if requested
-        if pipeline_config["training"]["run_koopman_training"]:
-            print("\\n" + "="*50)
-            print("Starting Koopman model training...")
-            print("="*50)
-            
-            # Create data loaders for Koopman training
-            koopman_train_loader = DataLoader(
-                koopman_train_dataset,
-                batch_size=koopman_config["training"]["batch_size"],
-                shuffle=True,
-                num_workers=koopman_config["training"]["num_workers"]
-            )
-            
-            koopman_val_loader = DataLoader(
-                koopman_val_dataset,
-                batch_size=koopman_config["training"]["batch_size"],
-                shuffle=False,
-                num_workers=koopman_config["training"]["num_workers"]
-            )
-            
-            # Set dimensions in config
-            koopman_config["task"]["dim_theta"] = koopman_train_dataset.theta.shape[1]
-            koopman_config["task"]["dim_x"] = koopman_train_dataset.x.shape[1]
-            
-            # Create model directory
-            model_dir = pipeline_config["paths"]["koopman_model_dir"]
-            os.makedirs(model_dir, exist_ok=True)
-            
-            # Create Koopman model
-            koopman_model = KoopmanFlow(
-                input_dim=koopman_config["task"]["dim_theta"],
-                context_dim=koopman_config["task"]["dim_x"],
-                lifting_dim=koopman_config["model"]["lifting_dim"],
-                network_kwargs=koopman_config["model"]["network_kwargs"],
-                device=koopman_config["training"]["device"],
-                lambda_rec=koopman_config["model"]["lambda_rec"],
-                lambda_lat=koopman_config["model"]["lambda_lat"],
-                lambda_pred=koopman_config["model"]["lambda_pred"],
-                output_dir=join("logs", dataset_name, "koopman")
-            )
-
-            # Set optimizer and scheduler
-            koopman_model.optimizer_kwargs = koopman_config["training"]["optimizer"]
-            koopman_model.scheduler_kwargs = koopman_config["training"]["scheduler"]
-            koopman_model.initialize_optimizer_and_scheduler()
-            
-            # Train model
-            koopman_model.train_model(
-                koopman_train_loader,
-                koopman_val_loader,
-                model_dir,
-                koopman_config["training"]["epochs"],
-                early_stopping=koopman_config["training"]["early_stopping"],
-                use_tensorboard=koopman_config["training"]["use_tensorboard"],
-                patience=koopman_config["training"]["patience"]
-            )
-
-            print("Koopman training completed!")
+    # Save teacher data if requested
+    if pipeline_config["data"]["save_teacher_data"]:
+        os.makedirs(teacher_data_dir, exist_ok=True)
+        
+        np.save(join(teacher_data_dir, 'eps.npy'), eps_teacher.numpy())
+        np.save(join(teacher_data_dir, 'theta.npy'), theta_teacher.numpy())
+        np.save(join(teacher_data_dir, 'x.npy'), x_teacher.numpy())
+        print(f"Saved teacher data to: {teacher_data_dir}")
     
+    #################################################################
+    ######## Create Koopman datasets ################################
+    #################################################################
+    # Split teacher data into train/val
+    num_samples = len(eps_teacher)
+    num_train = int(num_samples * pipeline_config["data"]["train_fraction"])
+    
+    indices = torch.randperm(num_samples)
+    train_indices = indices[:num_train]
+    val_indices = indices[num_train:]
+    
+    # Create subset datasets
+    train_eps = eps_teacher[train_indices]
+    train_theta = theta_teacher[train_indices]
+    train_x = x_teacher[train_indices]
+    
+    val_eps = eps_teacher[val_indices]
+    val_theta = theta_teacher[val_indices] 
+    val_x = x_teacher[val_indices]
+    
+    koopman_train_dataset = KoopmanTeacherDataset(train_eps, train_theta, train_x)
+    koopman_val_dataset = KoopmanTeacherDataset(val_eps, val_theta, val_x)
+    
+    print(f"Created Koopman datasets - Train: {len(koopman_train_dataset)}, Val: {len(koopman_val_dataset)}")
+    
+    #################################################################
+    ######## Train Koopman model ################################
+    #################################################################
+    # Train Koopman model if requested
+    if pipeline_config["training"]["run_koopman_training"]:
+        print("\\n" + "="*50)
+        print("Starting Koopman model training...")
+        print("="*50)
+        
+        # Create data loaders for Koopman training
+        koopman_train_loader = DataLoader(
+            koopman_train_dataset,
+            batch_size=koopman_config["training"]["batch_size"],
+            shuffle=True,
+            num_workers=koopman_config["training"]["num_workers"]
+        )
+        
+        koopman_val_loader = DataLoader(
+            koopman_val_dataset,
+            batch_size=koopman_config["training"]["batch_size"],
+            shuffle=False,
+            num_workers=koopman_config["training"]["num_workers"]
+        )
+        
+        # Set dimensions in config
+        koopman_config["task"]["dim_theta"] = koopman_train_dataset.theta.shape[1]
+        koopman_config["task"]["dim_x"] = koopman_train_dataset.x.shape[1]
+        
+        # Create model directory
+        model_dir = pipeline_config["paths"]["koopman_model_dir"]
+        os.makedirs(model_dir, exist_ok=True)
+        
+        # Create Koopman model
+        koopman_model = KoopmanFlow(
+            input_dim=koopman_config["task"]["dim_theta"],
+            context_dim=koopman_config["task"]["dim_x"],
+            lifting_dim=koopman_config["model"]["lifting_dim"],
+            network_kwargs=koopman_config["model"]["network_kwargs"],
+            device=device,
+            lambda_rec=koopman_config["model"]["lambda_rec"],
+            lambda_lat=koopman_config["model"]["lambda_lat"],
+            lambda_pred=koopman_config["model"]["lambda_pred"],
+            output_dir=join("logs", dataset_name, "koopman")
+        )
+
+        # Set optimizer and scheduler
+        koopman_model.optimizer_kwargs = koopman_config["training"]["optimizer"]
+        koopman_model.scheduler_kwargs = koopman_config["training"]["scheduler"]
+        koopman_model.initialize_optimizer_and_scheduler()
+        
+        # Train model
+        koopman_model.train_model(
+            koopman_train_loader,
+            koopman_val_loader,
+            model_dir,
+            koopman_config["training"]["epochs"],
+            early_stopping=koopman_config["training"]["early_stopping"],
+            use_tensorboard=koopman_config["training"]["use_tensorboard"],
+            patience=koopman_config["training"]["patience"]
+        )
+
+        print("Koopman training completed!")
+    
+    #################################################################
+    ######## Koopman Evaluation ################################
+    #################################################################
     # Evaluation section (runs in both modes)
     if pipeline_config["training"]["run_evaluation"]:
         print("\\n" + "="*50)
@@ -324,7 +347,7 @@ def main():
         model_dir = pipeline_config["paths"]["koopman_model_dir"]
         best_koopman_model = KoopmanFlow.load(
             join(model_dir, "best_model.pt"),
-            device=koopman_config["training"]["device"]
+            device=device
         )
         
         compute_c2st = pipeline_config["training"]["compute_c2st"]

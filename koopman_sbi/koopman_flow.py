@@ -9,17 +9,35 @@ import numpy as np
 from nn import DenseResidualNet
 
 
+def _get_default_device():
+    """Get default device with priority: CUDA > MPS > CPU
+
+    Note: MPS doesn't support float64, sets default dtype to float32 when using MPS.
+    """
+    if torch.cuda.is_available():
+        return "cuda"
+    elif torch.backends.mps.is_available():
+        # MPS doesn't support float64, so we need to use float32
+        torch.set_default_dtype(torch.float32)
+        return "mps"
+    else:
+        return "cpu"
+
+
 class KoopmanFlow(nn.Module):
     """Koopman-based distillation model for learning posterior p(theta|x) in simulation based inference."""
     
     def __init__(self, input_dim: int, context_dim: int,
-                 lifting_dim: int = 256, network_kwargs: dict = None, device: str = "cpu",
+                 lifting_dim: int = 256, network_kwargs: dict = None, device: str = None,
                  lambda_rec: float = 1.0, lambda_lat: float = 1.0, lambda_pred: float = 1.0,
                  output_dir: str = "/logs"):
         super().__init__()
         self.input_dim = input_dim  # theta dimension
-        self.context_dim = context_dim  # x dimension  
+        self.context_dim = context_dim  # x dimension
         self.lifting_dim = lifting_dim
+        # Auto-detect device if not specified (CUDA > MPS > CPU)
+        if device is None:
+            device = _get_default_device()
         self.device = torch.device(device)
         self.output_dir = output_dir
         
@@ -55,20 +73,15 @@ class KoopmanFlow(nn.Module):
         
         # Context-dependent Koopman operator: maps context x to Koopman matrix parameters
         # Generate the full Koopman matrix from context
-        if network_kwargs.get("type") == "DenseResidualNet":
-            self.koopman_generator = DenseResidualNet(
-                input_dim=context_dim,
-                output_dim=lifting_dim * lifting_dim,  # Generate full matrix
-                hidden_dims=[64, 128, 256, 128, 64],  # Smaller network for matrix generation
-                activation=network_kwargs["activation"],
-                batch_norm=network_kwargs["batch_norm"],
-                dropout=network_kwargs["dropout"],
-                theta_with_glu=False,
-                context_with_glu=network_kwargs["context_with_glu"],
-                context_dim=context_dim
+        
+        self.koopman_linear = nn.Linear(
+                in_features=lifting_dim,
+                out_features=lifting_dim
             )
-        else:
-            raise ValueError(f"Unsupported network type: {network_kwargs.get('type')}")
+        self.conditional_modulation = nn.Linear(
+                in_features=context_dim,
+                out_features=lifting_dim
+            )
         
         # Decoder evolved koopman, conditioned on x, from lifting space back to theta space
         decoder_input_dim = lifting_dim + context_dim
@@ -94,7 +107,12 @@ class KoopmanFlow(nn.Module):
         self.scheduler_kwargs = {}
         self.optimizer = None
         self.scheduler = None
-        
+
+    def _to_device(self, tensor):
+        """Move tensor to model's device with appropriate dtype (float32 for MPS, keep original for others)"""
+        if self.device.type == 'mps' and tensor.dtype == torch.float64:
+            return tensor.to(self.device, dtype=torch.float32)
+        return tensor.to(self.device)
 
     def initialize_optimizer_and_scheduler(self):
         """Initialize optimizer and scheduler from kwargs."""
@@ -122,22 +140,18 @@ class KoopmanFlow(nn.Module):
                 raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
     
     def forward(self, eps: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
-        """Forward pass: (eps, theta, x) -> theta prediction."""
-        batch_size = eps.shape[0]
+        """Forward pass: (eps, theta, x) -> theta prediction.
+        https://arxiv.org/pdf/2505.13358 just before section 5"""
         
         # lift epsilon conditioned on x
         eps_x_input = torch.cat([eps, context], dim=-1)
         z_lifted = self.encoder(eps_x_input)
         
         # Generate context-dependent Koopman matrix
-        koopman_matrix_flat = self.koopman_generator(context)  # (batch_size, lifting_dim^2)
-        koopman_matrix = koopman_matrix_flat.view(batch_size, self.lifting_dim, self.lifting_dim)
-        
-        # Apply context-dependent Koopman operator: z_evolved = K(x) @ z_lifted
-        z_evolved = torch.bmm(koopman_matrix, z_lifted.unsqueeze(-1)).squeeze(-1)
-        
+        z_lifted_evolved = self.koopman_linear(z_lifted)+self.conditional_modulation(context)
+
         # Decode back to theta space, conditioned on x
-        z_evolved_x_input = torch.cat([z_evolved, context], dim=-1)
+        z_evolved_x_input = torch.cat([z_lifted_evolved, context], dim=-1)
         theta_pred = self.decoder(z_evolved_x_input)
         return theta_pred
     
@@ -152,29 +166,26 @@ class KoopmanFlow(nn.Module):
         z_lifted = self.encoder(eps_x_input)
         
         # Generate context-dependent Koopman matrix
-        koopman_matrix_flat = self.koopman_generator(context)  # (batch_size, lifting_dim^2)
-        koopman_matrix = koopman_matrix_flat.view(batch_size, self.lifting_dim, self.lifting_dim)
-        
-        # Apply context-dependent Koopman operator: z_evolved = K(x) @ z_lifted
-        z_evolved = torch.bmm(koopman_matrix, z_lifted.unsqueeze(-1)).squeeze(-1)
-        
+        z_lifted_evolved = self.koopman_linear(z_lifted)+self.conditional_modulation(context)
+
         # Decode back to theta space, conditioned on x
-        z_evolved_x_input = torch.cat([z_evolved, context], dim=-1)
+        z_evolved_x_input = torch.cat([z_lifted_evolved, context], dim=-1)
         theta_pred = self.decoder(z_evolved_x_input)
         
-        # Main prediction loss: how well we predict theta from eps
+        # Prediction loss:
         L_pred = nn.MSELoss()(theta_pred, theta_target)
         
-        # Reconstruction loss: ensure encoder-decoder consistency
-        # Create a "clean" path by encoding theta directly as eps
+        # Reconstruction loss and latent loss
+        # lift true theta to koopman space
         theta_x_input = torch.cat([theta_target, context], dim=-1)
         theta_lifted = self.encoder(theta_x_input)
+        # map it back to theta space
         theta_lifted_x_input = torch.cat([theta_lifted, context], dim=-1)
         theta_rec = self.decoder(theta_lifted_x_input)
+        # reconstruction loss
         L_rec = nn.MSELoss()(theta_rec, theta_target)
-        
-        # Latent dynamics loss: ensure consistency in lifted space
-        L_lat = nn.MSELoss()(z_evolved, theta_lifted)
+        # Latent dynamics loss
+        L_lat = nn.MSELoss()(z_lifted_evolved, theta_lifted)
         
         # Total loss
         total_loss = (self.lambda_rec * L_rec + 
@@ -216,7 +227,7 @@ class KoopmanFlow(nn.Module):
         total_losses = {'total_loss': 0.0, 'L_rec': 0.0, 'L_lat': 0.0, 'L_pred': 0.0}
         num_batches = 0
         for batch in train_loader:
-            eps, theta, context = batch[0].to(self.device), batch[1].to(self.device), batch[2].to(self.device)
+            eps, theta, context = self._to_device(batch[0]), self._to_device(batch[1]), self._to_device(batch[2])
             self.optimizer.zero_grad()
             losses = self.compute_koopman_loss(eps, theta, context)
             losses['total_loss'].backward()
@@ -239,10 +250,10 @@ class KoopmanFlow(nn.Module):
         self.eval()
         total_loss = 0.0
         num_batches = 0
-        
+
         with torch.no_grad():
             for batch in validation_loader:
-                eps, theta, context = batch[0].to(self.device), batch[1].to(self.device), batch[2].to(self.device)
+                eps, theta, context = self._to_device(batch[0]), self._to_device(batch[1]), self._to_device(batch[2])
                 losses = self.compute_koopman_loss(eps, theta, context)
                 total_loss += losses['total_loss'].item()
                 num_batches += 1
@@ -336,8 +347,10 @@ class KoopmanFlow(nn.Module):
         }, filepath)
     
     @classmethod
-    def load(cls, filepath: str, device: str = "cpu"):
-        """Load model from file."""
+    def load(cls, filepath: str, device: str = None):
+        """Load model from file. Auto-detects device if not specified (CUDA > MPS > CPU)."""
+        if device is None:
+            device = _get_default_device()
         checkpoint = torch.load(filepath, map_location=device)
         model = cls(
             input_dim=checkpoint['input_dim'],
