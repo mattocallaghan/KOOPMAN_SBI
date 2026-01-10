@@ -203,13 +203,15 @@ class KoopmanFlow(nn.Module):
         """Generate samples by sampling epsilon and transforming via the model."""
         self.eval()
         with torch.no_grad():
+            # Move context to model's device
+            context = self._to_device(context)
             batch_size = context.shape[0]
-            
+
             # Sample epsilon from a standard normal prior
             eps_prior = torch.randn(batch_size, self.input_dim, device=self.device)
             # Forward pass through the full pipeline
             samples = self.forward(eps_prior, context)
-            
+
         return samples
     
     def log_prob_batch(self, theta: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
@@ -366,5 +368,6 @@ class KoopmanFlow(nn.Module):
         model.lambda_rec = checkpoint.get('lambda_rec', 1.0)
         model.lambda_lat = checkpoint.get('lambda_lat', 1.0)
         model.lambda_pred = checkpoint.get('lambda_pred', 1.0)
+        model.to(model.device)
         return model
 

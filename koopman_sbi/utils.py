@@ -78,7 +78,11 @@ def evaluate_model(config, dataset, model, compute_c2st=False, model_type="koopm
         )
 
         # discard samples outside the prior
-        prior_mask = torch.isfinite(task.prior_dist.log_prob(posterior_samples))
+        # MPS doesn't support some operations in prior.log_prob, so move to CPU if needed
+        if model.device.type == 'mps':
+            prior_mask = torch.isfinite(task.prior_dist.log_prob(posterior_samples.cpu())).to(model.device)
+        else:
+            prior_mask = torch.isfinite(task.prior_dist.log_prob(posterior_samples))
         print(
             f"{(1 - torch.sum(prior_mask) / len(prior_mask)) * 100:.2f}% of the samples "
             f"lie outside of the prior. Discarding these."
@@ -98,16 +102,19 @@ def evaluate_model(config, dataset, model, compute_c2st=False, model_type="koopm
         
         # Always generate plots
         fig = plt.figure(figsize=(10, 10))
+        # Convert tensors to CPU for matplotlib
+        posterior_samples_cpu = posterior_samples.cpu().numpy()
+        reference_samples_cpu = reference_samples.cpu().numpy()
         plt.scatter(
-            posterior_samples[:, 0],
-            posterior_samples[:, 1],
+            posterior_samples_cpu[:, 0],
+            posterior_samples_cpu[:, 1],
             s=0.5,
             alpha=0.2,
             label=f"Koopman flow ({len(posterior_samples)} samples)",
         )
         plt.scatter(
-            reference_samples[:, 0],
-            reference_samples[:, 1],
+            reference_samples_cpu[:, 0],
+            reference_samples_cpu[:, 1],
             s=0.5,
             alpha=0.2,
             label=f"reference ({len(reference_samples)} samples)",
@@ -161,13 +168,19 @@ def plot_posteriors_and_log_probs(
         posterior_log_probs,
         train_dir
         ):
+    # Convert tensors to CPU for matplotlib
+    posterior_log_probs_cpu = posterior_log_probs.cpu().numpy()
+    reference_log_probs_cpu = reference_log_probs.cpu().numpy()
+    posterior_samples_cpu = posterior_samples.cpu().numpy()
+    reference_samples_cpu = reference_samples.cpu().numpy()
+
     plt.hist(
-        posterior_log_probs,
+        posterior_log_probs_cpu,
         alpha=0.2,
         label="posterior log probs",
     )
     plt.hist(
-        reference_log_probs,
+        reference_log_probs_cpu,
         alpha=0.2,
         label="reference log probs",
     )
@@ -176,15 +189,15 @@ def plot_posteriors_and_log_probs(
     plt.clf()
 
     plt.scatter(
-        posterior_samples[:, 0],
-        posterior_samples[:, 1],
+        posterior_samples_cpu[:, 0],
+        posterior_samples_cpu[:, 1],
         s=0.5,
         alpha=0.2,
         label="flow matching",
     )
     plt.scatter(
-        reference_samples[:, 0],
-        reference_samples[:, 1],
+        reference_samples_cpu[:, 0],
+        reference_samples_cpu[:, 1],
         s=0.5,
         alpha=0.2,
         label="reference",
@@ -243,7 +256,11 @@ def complete_model_evaluation(config, dataset, model, metrics, save_samples=True
         )
 
         # discard samples outside the prior
-        prior_mask = torch.isfinite(task.prior_dist.log_prob(posterior_samples))
+        # MPS doesn't support some operations in prior.log_prob, so move to CPU if needed
+        if model.device.type == 'mps':
+            prior_mask = torch.isfinite(task.prior_dist.log_prob(posterior_samples.cpu())).to(model.device)
+        else:
+            prior_mask = torch.isfinite(task.prior_dist.log_prob(posterior_samples))
         print(
             f"{(1 - torch.sum(prior_mask) / len(prior_mask)) * 100:.2f}% of the samples "
             f"lie outside of the prior. Discarding these."
@@ -274,9 +291,9 @@ def complete_model_evaluation(config, dataset, model, metrics, save_samples=True
             dir_obs = join(eval_dir, str(obs).zfill(2))
             from pathlib import Path
             Path(dir_obs).mkdir(exist_ok=True)
-            np.save(join(dir_obs, 'samples.npy'), posterior_samples)
-            np.save(join(dir_obs, 'posterior_log_probs.npy'), posterior_log_probs)
-            np.save(join(dir_obs, 'reference_log_probs.npy'), reference_log_probs)
+            np.save(join(dir_obs, 'samples.npy'), posterior_samples.cpu().numpy())
+            np.save(join(dir_obs, 'posterior_log_probs.npy'), posterior_log_probs.cpu().numpy())
+            np.save(join(dir_obs, 'reference_log_probs.npy'), reference_log_probs.cpu().numpy())
 
     with open(
             join(eval_dir, "results.csv"), "w"

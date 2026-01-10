@@ -21,6 +21,9 @@ class SbiDataset(Dataset):
     def standardize(self, sample, label, inverse=False):
         mean = self.standardization[label]["mean"]
         std = self.standardization[label]["std"]
+        # Move mean and std to same device as sample
+        mean = mean.to(sample.device)
+        std = std.to(sample.device)
         if not inverse:
             return (sample - mean) / std
         else:

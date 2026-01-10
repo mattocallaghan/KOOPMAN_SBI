@@ -112,7 +112,7 @@ class ConditionalFlowMatching(nn.Module):
             # Power law distribution: t ~ U(0,1)^(1/time_prior_exponent)
             u = torch.rand(batch_size, device=self.device)
             return u ** (1.0 / self.time_prior_exponent)
-    
+
     def sample_theta_0(self, batch_size: int) -> torch.Tensor:
         """Sample noise theta_0 ~ N(0, I)."""
         return torch.randn(batch_size, self.input_dim, device=self.device)
@@ -122,8 +122,8 @@ class ConditionalFlowMatching(nn.Module):
         return (1 - (1 - self.sigma_min) * t)[:, None] * theta_0 + t[:, None] * theta_1
     
     def forward(self, t: torch.Tensor, theta: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
-        """Forward pass: predict velocity field v_t(theta|x). 
-        
+        """Forward pass: predict velocity field v_t(theta|x).
+
         Args:
             t: time tensor of shape (batch_size,)
             theta: theta tensor of shape (batch_size, input_dim)
@@ -134,7 +134,7 @@ class ConditionalFlowMatching(nn.Module):
         # Ensure time has correct shape (batch_size, 1)
         if t.dim() == 1:
             t = t.unsqueeze(1)
-            
+
         # Concatenate theta, context, and time
         input_tensor = torch.cat([theta, context, t], dim=-1)
         velocity = self.vector_field(input_tensor)
@@ -178,18 +178,38 @@ class ConditionalFlowMatching(nn.Module):
         self.eval()
         batch_size = context.shape[0]
         with torch.no_grad():
+            # Ensure context is in float32 for MPS compatibility
+            if self.device.type == 'mps':
+                context = context.to(dtype=torch.float32)
+
             if custom_theta_0 is not None:
                 assert custom_theta_0.shape[0] == batch_size, "custom_theta_0 batch size must match context batch size."
                 theta_0 = custom_theta_0
+                # Ensure theta_0 is in float32 for MPS compatibility
+                if self.device.type == 'mps':
+                    theta_0 = theta_0.to(dtype=torch.float32)
             else:
                 theta_0 = self.sample_theta_0(batch_size)
+
+            # Ensure theta_0 is float32 on MPS to avoid dtype issues with odeint
+            if self.device.type == 'mps' and theta_0.dtype != torch.float32:
+                theta_0 = theta_0.to(dtype=torch.float32)
+
+            # Time points - use float32 for MPS
+            dtype = torch.float32 if self.device.type == 'mps' else torch.float64
+            t_span = torch.tensor([0.0, 1.0 - self.sigma_min], dtype=dtype, device=self.device)
+
+            # Set ODE solver options with dtype for MPS compatibility
+            ode_options = {'dtype': torch.float32} if self.device.type == 'mps' else {}
+
             _, theta_1 = odeint(
                 lambda t, theta_t: self.forward(t, theta_t, context),
                 theta_0,
-                torch.tensor([0.0, 1.0 - self.sigma_min]).type(torch.float32).to(self.device),
-                atol=1e-7,
-                rtol=1e-7,
+                t_span,
+                atol=1e-5,
+                rtol=1e-5,
                 method="dopri5",
+                options=ode_options,
             )
 
         return theta_1
@@ -340,6 +360,10 @@ class ConditionalFlowMatching(nn.Module):
         model.load_state_dict(checkpoint['model_state_dict'])
         model.optimizer_kwargs = checkpoint.get('optimizer_kwargs', {})
         model.scheduler_kwargs = checkpoint.get('scheduler_kwargs', {})
+
+        # Ensure model is on the correct device
+        model.to(model.device)
+
         return model
     
 
