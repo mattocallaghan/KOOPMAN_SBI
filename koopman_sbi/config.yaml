@@ -4,14 +4,14 @@
 task:
   name: "two_moons"  # SBIBM task name (e.g., "two_moons", "slcp", "bernoulli_glm", etc.)
   num_train_samples: 10000
-  batch_size: 1000
+  batch_size: 256
   train_fraction: 0.8
 
 # Model Architecture Configuration
 model:
   input_dim: null  # Will be set automatically from task
   context_dim: null  # Will be set automatically from task
-  lifting_dim: 124  # Dimension of the high-dimensional Koopman space
+  lifting_dim: 256  # Dimension of the high-dimensional Koopman space
   
   # Loss function weights
   lambda_rec: 1.0    # Reconstruction loss weight

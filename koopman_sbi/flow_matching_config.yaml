@@ -3,8 +3,8 @@
 # Task Configuration
 task:
   name: "two_moons"  # SBIBM task name (e.g., "two_moons", "slcp", "bernoulli_glm", etc.)
-  num_train_samples: 10000
-  batch_size: 1000
+  num_train_samples: 100000
+  batch_size: 64
   train_fraction: 0.8
 
 # Model Architecture Configuration

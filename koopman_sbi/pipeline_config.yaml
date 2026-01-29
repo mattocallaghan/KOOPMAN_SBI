@@ -2,7 +2,7 @@
 
 # Teacher Data Generation
 teacher:
-  num_samples: 1000000          # Number of samples to generate from teacher model
+  num_samples: 100000          # Number of samples to generate from teacher model
   num_context: 10000          # Number of context points to randomly select from dataset
   batch_size: 1000          # Batch size for teacher data generation
   use_teacher: true          # Whether to use teacher model (set to false for direct training)
