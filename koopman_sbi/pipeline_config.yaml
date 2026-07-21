@@ -1,28 +1,220 @@
-# Pipeline Configuration for Koopman Teacher Training
+task:
+  name: "two_moons"
+  seed: 0
+  num_train_samples: 10000
+  simulation_batch_size: 256
+  train_fraction: 0.8
+  use_cached_dataset: true
+  dataset_dir: null
 
-# Teacher Data Generation
+model:
+  flow_matching:
+    sigma_min: 0.0001
+    time_prior_exponent: 4.0
+    integration_steps: null
+    network:
+      type: "DenseResidualNet"
+      hidden_dims: [64, 256, 1024, 256, 64]
+      activation: "gelu"
+      batch_norm: false
+      dropout: 0.0
+      theta_with_glu: false
+      context_with_glu: false
+  koopman:
+    lifting_dim: 256
+    lambda_rec: 1.0
+    lambda_lat: 1.0
+    lambda_pred: 1.0
+    network:
+      type: "DenseResidualNet"
+      hidden_dims: [64, 256, 1024, 256, 64]
+      activation: "gelu"
+      batch_norm: false
+      dropout: 0.0
+      theta_with_glu: false
+      context_with_glu: false
+  npe:
+    backend: "normflows"
+    num_coupling_layers: 6
+    transform: "affine"
+    permutation: "swap"
+    use_actnorm: false
+    base_distribution: "normal"
+    network:
+      type: "DenseResidualNet"
+      hidden_dims: [128, 128, 128]
+      activation: "gelu"
+      batch_norm: false
+      dropout: 0.0
+      theta_with_glu: false
+      context_with_glu: false
+  cmpe:
+    eps: 0.001
+    t_max: 200.0
+    rho: 7.0
+    sigma_data: 1.0
+    s0: 10
+    s1: 50
+    p_mean: -1.1
+    p_std: 2.0
+    default_num_steps: 10
+    network:
+      type: "DenseResidualNet"
+      hidden_dims: [256, 256, 256, 256, 256]
+      activation: "relu"
+      batch_norm: false
+      dropout: 0.0
+      theta_with_glu: false
+      context_with_glu: false
+
 teacher:
-  num_samples: 100000          # Number of samples to generate from teacher model
-  num_context: 10000          # Number of context points to randomly select from dataset
-  batch_size: 1000          # Batch size for teacher data generation
-  use_teacher: true          # Whether to use teacher model (set to false for direct training)
+  checkpoint_path: "logs/two_moons/last_model/train_flow/best_model.pt"
+  auto_train_if_missing: true
+  num_samples: 10000
+  num_context: 2000
+  batch_size: 512
+  cache_trajectories: true
+  load_cached_trajectories: true
+  trajectory_dir: null
 
-# Data Configuration
-data:
-  train_fraction: 0.8        # Fraction of teacher data to use for training
-  save_teacher_data: true    # Whether to save generated teacher data
-  load_existing_trajectories: false  # Whether to load existing saved trajectories
-  teacher_data_dir: null     # Will be set to logs/{task_name}/teacher_data
-
-# Training Configuration  
 training:
-  run_koopman_training: true # Whether to train Koopman model after data generation
-  run_evaluation: true       # Whether to run evaluation after training
-  compute_c2st: false         # Whether to compute C2ST scores (slow)
-  evaluation_only: true      # Skip trajectory generation and training, only evaluate
+  flow_matching:
+    batch_size: 64
+    epochs: 20
+    num_workers: 0
+    device: "auto"
+    early_stopping: true
+    patience: 10
+    gradient_clip_norm: null
+    precision: "float32"
+    use_tensorboard: true
+    optimizer:
+      name: "Adam"
+      lr: 0.001
+      weight_decay: 0.00001
+    scheduler:
+      type: "reduce_on_plateau"
+      factor: 0.5
+      patience: 5
+      step_size: 10
+      gamma: 0.5
+  koopman:
+    batch_size: 128
+    epochs: 20
+    num_workers: 0
+    device: "auto"
+    early_stopping: true
+    patience: 10
+    gradient_clip_norm: null
+    precision: "float32"
+    use_tensorboard: true
+    optimizer:
+      name: "Adam"
+      lr: 0.001
+      weight_decay: 0.00001
+    scheduler:
+      type: "reduce_on_plateau"
+      factor: 0.5
+      patience: 5
+      step_size: 10
+      gamma: 0.5
+  npe:
+    batch_size: 128
+    epochs: 20
+    num_workers: 0
+    device: "auto"
+    early_stopping: true
+    patience: 10
+    early_stopping_min_delta: 0.005
+    gradient_clip_norm: null
+    precision: "float32"
+    use_tensorboard: true
+    optimizer:
+      name: "Adam"
+      lr: 0.0005
+      weight_decay: 0.0
+    scheduler:
+      type: "reduce_on_plateau"
+      factor: 0.5
+      patience: 5
+      step_size: 10
+      gamma: 0.5
+  cmpe:
+    batch_size: 128
+    epochs: 20
+    num_workers: 0
+    device: "auto"
+    early_stopping: true
+    patience: 100
+    early_stopping_min_delta: 0.005
+    gradient_clip_norm: null
+    precision: "float32"
+    use_tensorboard: true
+    optimizer:
+      name: "AdamW"
+      lr: 0.0001
+      weight_decay: 0.0
+    scheduler:
+      type: "StepLR"
+      factor: 0.5
+      patience: 5
+      step_size: 1
+      gamma: 1.0
 
-# Model Paths (will be set automatically)
-paths:
-  flow_model_path: null      # Will be set to logs/{task_name}/flow_matching/models/best_model.pt
-  koopman_model_dir: null    # Will be set to logs/{task_name}/koopman/models
-  base_data_dir: null        # Will be set to logs/{task_name}/data
+evaluation:
+  num_posterior_samples: 1000
+  observations: [1, 2, 3]
+  metrics: ["c2st", "mmd", "posterior_mean_error", "posterior_variance_ratio"]
+  flow_checkpoint_path: "logs/two_moons/last_model/train_flow/best_model.pt"
+  koopman_checkpoint_path: "logs/two_moons/last_model/distill_koopman/best_model.pt"
+  npe_checkpoint_path: "logs/two_moons/last_model/train_npe/best_model.pt"
+  cmpe_checkpoint_path: "logs/two_moons/last_model/train_cmpe/best_model.pt"
+  include_npe: false
+  save_observation_plots: true
+
+logging:
+  output_root: "logs"
+  run_name: null
+  use_tensorboard: true
+  use_wandb: false
+  wandb_project: "koopman-sbi"
+  wandb_run_name: null
+  wandb_tags: []
+
+benchmark_suite:
+  variants:
+    - name: "npe"
+      model_type: "npe"
+      sample_kwargs: {}
+    - name: "fmnpe_dopri5"
+      model_type: "flow_matching"
+      sample_kwargs:
+        solver: "dopri5"
+        atol: 0.00001
+        rtol: 0.00001
+    - name: "fmnpe_rk4_10"
+      model_type: "flow_matching"
+      sample_kwargs:
+        solver: "rk4"
+        integration_steps: 10
+    - name: "fmnpe_rk4_100"
+      model_type: "flow_matching"
+      sample_kwargs:
+        solver: "rk4"
+        integration_steps: 100
+    - name: "fmnpe_rk4_1000"
+      model_type: "flow_matching"
+      sample_kwargs:
+        solver: "rk4"
+        integration_steps: 1000
+    - name: "cmpe_10"
+      model_type: "cmpe"
+      sample_kwargs:
+        num_steps: 10
+    - name: "cmpe_100"
+      model_type: "cmpe"
+      sample_kwargs:
+        num_steps: 100
+    - name: "koopman"
+      model_type: "koopman"
+      sample_kwargs: {}

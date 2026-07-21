@@ -1,17 +1,19 @@
 task:
   name: "two_moons"
   seed: 0
-  num_train_samples: 100000
+  num_train_samples: 10000
   simulation_batch_size: 256
   train_fraction: 0.8
-  use_cached_dataset: false
+  use_cached_dataset: true
   dataset_dir: null
 
 model:
   flow_matching:
     sigma_min: 0.0001
-    time_prior_exponent: 4.0
+    time_prior_exponent: 2.0
     integration_steps: null
+    atol: 0.00001
+    rtol: 0.00001
     network:
       type: "DenseResidualNet"
       hidden_dims: [64, 256, 1024, 256, 64]
@@ -70,9 +72,9 @@ model:
 teacher:
   checkpoint_path: "logs/two_moons/last_model/train_flow/best_model.pt"
   auto_train_if_missing: true
-  num_samples: 100000
+  num_samples: 10000
   num_context: 2000
-  batch_size: 64
+  batch_size: 512
   cache_trajectories: true
   load_cached_trajectories: true
   trajectory_dir: null
@@ -80,12 +82,12 @@ teacher:
 training:
   flow_matching:
     batch_size: 64
-    epochs: 200
+    epochs: 20
     fit_verbose: 2
     num_workers: 0
     device: "auto"
     early_stopping: true
-    patience: 20
+    patience: 10
     gradient_clip_norm: null
     precision: "float32"
     use_tensorboard: true
@@ -101,7 +103,7 @@ training:
       gamma: 0.5
   koopman:
     batch_size: 128
-    epochs: 200
+    epochs: 20
     fit_verbose: 2
     num_workers: 0
     device: "auto"
@@ -123,7 +125,7 @@ training:
       gamma: 0.5
   npe:
     batch_size: 128
-    epochs: 200
+    epochs: 20
     fit_verbose: 2
     num_workers: 0
     device: "auto"
@@ -145,7 +147,7 @@ training:
       gamma: 0.5
   cmpe:
     batch_size: 128
-    epochs: 200
+    epochs: 20
     fit_verbose: 2
     num_workers: 0
     device: "auto"

@@ -12,6 +12,8 @@ model:
     sigma_min: 0.0001
     time_prior_exponent: 4.0
     integration_steps: null
+    atol: 0.00001
+    rtol: 0.00001
     network:
       type: "DenseResidualNet"
       hidden_dims: [64, 256, 1024, 256, 64]
@@ -35,7 +37,7 @@ model:
       context_with_glu: false
   npe:
     backend: "normflows"
-    num_coupling_layers: 6
+    num_coupling_layers: 4
     transform: "affine"
     permutation: "swap"
     use_actnorm: false
@@ -135,7 +137,7 @@ training:
     use_tensorboard: true
     optimizer:
       name: "Adam"
-      lr: 0.0005
+      lr: 0.001
       weight_decay: 0.0
     scheduler:
       type: "reduce_on_plateau"

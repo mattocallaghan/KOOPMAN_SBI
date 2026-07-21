@@ -1,5 +1,5 @@
 task:
-  name: "two_moons"
+  name: "bernoulli_glm"
   seed: 0
   num_train_samples: 100000
   simulation_batch_size: 256
@@ -12,6 +12,8 @@ model:
     sigma_min: 0.0001
     time_prior_exponent: 4.0
     integration_steps: null
+    atol: 0.00001
+    rtol: 0.00001
     network:
       type: "DenseResidualNet"
       hidden_dims: [64, 256, 1024, 256, 64]
@@ -35,14 +37,14 @@ model:
       context_with_glu: false
   npe:
     backend: "normflows"
-    num_coupling_layers: 6
+    num_coupling_layers: 5
     transform: "affine"
     permutation: "swap"
     use_actnorm: false
     base_distribution: "normal"
     network:
       type: "DenseResidualNet"
-      hidden_dims: [128, 128, 128]
+      hidden_dims: [32, 32, 32]
       activation: "gelu"
       batch_norm: false
       dropout: 0.0
@@ -68,7 +70,7 @@ model:
       context_with_glu: false
 
 teacher:
-  checkpoint_path: "logs/two_moons/last_model/train_flow/best_model.pt"
+  checkpoint_path: "logs/bernoulli_glm/last_model/train_flow/best_model.pt"
   auto_train_if_missing: true
   num_samples: 100000
   num_context: 2000
@@ -81,7 +83,6 @@ training:
   flow_matching:
     batch_size: 64
     epochs: 200
-    fit_verbose: 2
     num_workers: 0
     device: "auto"
     early_stopping: true
@@ -102,12 +103,10 @@ training:
   koopman:
     batch_size: 128
     epochs: 200
-    fit_verbose: 2
     num_workers: 0
     device: "auto"
     early_stopping: true
     patience: 10
-    early_stopping_min_delta: 0.005
     gradient_clip_norm: null
     precision: "float32"
     use_tensorboard: true
@@ -124,7 +123,6 @@ training:
   npe:
     batch_size: 128
     epochs: 200
-    fit_verbose: 2
     num_workers: 0
     device: "auto"
     early_stopping: true
@@ -146,7 +144,6 @@ training:
   cmpe:
     batch_size: 128
     epochs: 200
-    fit_verbose: 2
     num_workers: 0
     device: "auto"
     early_stopping: true
@@ -170,10 +167,10 @@ evaluation:
   num_posterior_samples: 1000
   observations: [1, 2, 3]
   metrics: ["c2st", "mmd", "posterior_mean_error", "posterior_variance_ratio"]
-  flow_checkpoint_path: "logs/two_moons/last_model/train_flow/best_model.pt"
-  koopman_checkpoint_path: "logs/two_moons/last_model/distill_koopman/best_model.pt"
-  npe_checkpoint_path: "logs/two_moons/last_model/train_npe/best_model.pt"
-  cmpe_checkpoint_path: "logs/two_moons/last_model/train_cmpe/best_model.pt"
+  flow_checkpoint_path: "logs/bernoulli_glm/last_model/train_flow/best_model.pt"
+  koopman_checkpoint_path: "logs/bernoulli_glm/last_model/distill_koopman/best_model.pt"
+  npe_checkpoint_path: "logs/bernoulli_glm/last_model/train_npe/best_model.pt"
+  cmpe_checkpoint_path: "logs/bernoulli_glm/last_model/train_cmpe/best_model.pt"
   include_npe: false
   save_observation_plots: true
 
