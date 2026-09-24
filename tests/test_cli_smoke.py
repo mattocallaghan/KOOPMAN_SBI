@@ -26,15 +26,6 @@ def test_distill_koopman_cli_smoke(tiny_config_path, monkeypatch):
     assert list((tiny_config_path.parent / "logs" / "two_moons" / "distill_koopman").glob("test_run/checkpoints/best_model.pt"))
 
 
-def test_benchmark_compare_cli_smoke(tiny_config_path, monkeypatch):
-    _run_cli("benchmark-compare", tiny_config_path, monkeypatch)
-    benchmark_dir = tiny_config_path.parent / "logs" / "two_moons" / "benchmark_compare" / "test_run" / "benchmark"
-    assert (benchmark_dir / "comparison_summary.csv").exists()
-    assert (benchmark_dir / "benchmark_spider.png").exists()
-    assert (benchmark_dir / "worth_it_curve.png").exists()
-    assert (benchmark_dir / "worth_it_inference_curve.png").exists()
-
-
 def test_benchmark_suite_cli_smoke(tiny_config_path, monkeypatch):
     _run_cli("benchmark-suite", tiny_config_path, monkeypatch)
     benchmark_dir = tiny_config_path.parent / "logs" / "two_moons" / "benchmark_suite" / "test_run" / "benchmark"

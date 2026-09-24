@@ -7,25 +7,11 @@ import torch.nn as nn
 
 try:
     from torchdiffeq import odeint
-except ImportError:
-    def odeint(func, y0, t, atol=None, rtol=None, method=None, options=None):
-        del atol, rtol, options
-        states = [y0]
-        current = y0
-        for index in range(1, len(t)):
-            t_prev = t[index - 1]
-            t_next = t[index]
-            dt = t_next - t_prev
-            if method == "rk4":
-                k1 = func(t_prev, current)
-                k2 = func(t_prev + 0.5 * dt, current + 0.5 * dt * k1)
-                k3 = func(t_prev + 0.5 * dt, current + 0.5 * dt * k2)
-                k4 = func(t_next, current + dt * k3)
-                current = current + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-            else:
-                current = current + dt * func(t_prev, current)
-            states.append(current)
-        return torch.stack(states, dim=0)
+except ImportError as exc:
+    odeint = None
+    _TORCHDIFFEQ_IMPORT_ERROR = exc
+else:
+    _TORCHDIFFEQ_IMPORT_ERROR = None
 
 from koopman_sbi.config import FlowMatchingModelConfig, NetworkConfig
 from koopman_sbi.models.base import BasePosteriorModel
@@ -87,7 +73,8 @@ class ConditionalFlowMatching(BasePosteriorModel):
         model_input = torch.cat([theta, context, time], dim=-1)
         return self.vector_field(model_input)
 
-    def compute_loss(self, batch: Any) -> Dict[str, torch.Tensor]:
+    def compute_loss(self, batch: Any, **kwargs: Any) -> Dict[str, torch.Tensor]:
+        del kwargs
         theta_target, context = batch
         batch_size = theta_target.shape[0]
         time = self.sample_time(batch_size)
@@ -110,6 +97,11 @@ class ConditionalFlowMatching(BasePosteriorModel):
         atol: Optional[float] = None,
         rtol: Optional[float] = None,
     ) -> torch.Tensor:
+        if odeint is None:
+            raise ImportError(
+                "ConditionalFlowMatching sampling requires the `torchdiffeq` package. "
+                "Install it in the active environment instead of using the removed fallback integrator."
+            ) from _TORCHDIFFEQ_IMPORT_ERROR
         self.eval()
         with torch.no_grad():
             context = move_tensor_to_device(context, self.device)

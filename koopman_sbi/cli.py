@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import os
+from pathlib import Path
+
+os.environ.setdefault("KERAS_BACKEND", "torch")
+mpl_config_dir = Path.cwd() / ".cache" / "matplotlib"
+mpl_config_dir.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(mpl_config_dir))
 
 from koopman_sbi.config import resolve_task_config_path
 from koopman_sbi.experiments import (
     run_gpu_evaluation,
-    run_benchmark_compare,
     run_benchmark_suite,
     run_distill_koopman,
     run_evaluate,
     run_train_cmpe,
     run_train_flow,
     run_train_npe,
+    run_train_nsf,
+    run_train_tensorproduct_koopman,
     run_train_koopman,
 )
 
@@ -23,10 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
     for command in [
         "train-flow",
         "train-npe",
+        "train-nsf",
         "train-cmpe",
         "train-koopman",
+        "train-tensorproduct-koopman",
         "distill-koopman",
-        "benchmark-compare",
         "benchmark-suite",
         "evaluate",
         "gpu-evaluation",
@@ -41,12 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
             help="Optional directory containing per-task YAML configs. Defaults to `koopman_sbi/configs/tasks`.",
         )
         if command == "gpu-evaluation":
-            subparser.add_argument("--num-posterior-samples", type=int, default=1000)
             subparser.add_argument(
                 "--observation-counts",
                 type=int,
                 nargs="+",
-                default=[1, 10, 100, 1000, 10000, 100000, 1000000, 10000000],
+                default=[1, 10, 100, 1000, 10000, 500000, 800000, 1000000, 2000000, 5000000, 10000000, 40000000, 100000000],
             )
             subparser.add_argument("--max-context-batch-size", type=int, default=100000)
             subparser.add_argument(
@@ -56,6 +64,19 @@ def build_parser() -> argparse.ArgumentParser:
             )
             subparser.add_argument("--num-repeats", type=int, default=3)
             subparser.add_argument("--warmup-observations", type=int, default=1)
+            subparser.add_argument("--x-scale", choices=["log", "linear"], default="log")
+            subparser.add_argument("--y-scale", choices=["log", "linear"], default="log")
+        if command == "benchmark-suite":
+            subparser.add_argument(
+                "--plots-only",
+                action="store_true",
+                help="Regenerate benchmark plots from saved benchmark-suite artifacts without recomputing models.",
+            )
+            subparser.add_argument(
+                "--force-retrain",
+                action="store_true",
+                help="Retrain requested benchmark models from scratch for this task before benchmarking.",
+            )
     return parser
 
 
@@ -73,27 +94,35 @@ def main() -> None:
         run_train_flow(config_path)
     elif args.command == "train-npe":
         run_train_npe(config_path)
+    elif args.command == "train-nsf":
+        run_train_nsf(config_path)
     elif args.command == "train-cmpe":
         run_train_cmpe(config_path)
     elif args.command == "train-koopman":
         run_train_koopman(config_path)
+    elif args.command == "train-tensorproduct-koopman":
+        run_train_tensorproduct_koopman(config_path)
     elif args.command == "distill-koopman":
         run_distill_koopman(config_path)
-    elif args.command == "benchmark-compare":
-        run_benchmark_compare(config_path)
     elif args.command == "benchmark-suite":
-        run_benchmark_suite(config_path)
+        run_benchmark_suite(
+            config_path,
+            plots_only=bool(getattr(args, "plots_only", False)),
+            force_retrain=bool(getattr(args, "force_retrain", False)),
+        )
     elif args.command == "evaluate":
         run_evaluate(config_path)
     elif args.command == "gpu-evaluation":
         run_gpu_evaluation(
             config_path=config_path,
-            num_posterior_samples=args.num_posterior_samples,
+            num_posterior_samples=1,
             observation_counts=args.observation_counts,
             max_context_batch_size=args.max_context_batch_size,
             auto_max_context_batch_size=args.auto_max_context_batch_size,
             num_repeats=args.num_repeats,
             warmup_observations=args.warmup_observations,
+            x_scale=args.x_scale,
+            y_scale=args.y_scale,
         )
     else:
         parser.error(f"Unknown command: {args.command}")

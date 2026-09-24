@@ -31,12 +31,13 @@ class FlowMatchingModelConfig:
 @dataclass
 class CMPEModelConfig:
     network: NetworkConfig
+    backend: str = "bayesflow"
     eps: float = 1e-3
-    t_max: float = 200.0
+    t_max: float = 80.0
     rho: float = 7.0
     sigma_data: float = 1.0
     s0: int = 10
-    s1: int = 50
+    s1: int = 150
     p_mean: float = -1.1
     p_std: float = 2.0
     default_num_steps: int = 10
@@ -49,6 +50,30 @@ class KoopmanModelConfig:
     lambda_rec: float = 1.0
     lambda_lat: float = 1.0
     lambda_pred: float = 1.0
+    adversarial: "AdversarialConfig" = field(default_factory=lambda: AdversarialConfig())
+
+
+@dataclass
+class TensorProductKoopmanModelConfig:
+    state_network: NetworkConfig
+    context_network: NetworkConfig
+    decoder_network: NetworkConfig
+    latent_dim: int = 256
+    context_feature_dim: int = 128
+    tensor_rank: int = 64
+    lambda_ae: float = 1.0
+    lambda_lat: float = 1.0
+    lambda_end: float = 1.0
+
+
+@dataclass
+class AdversarialConfig:
+    enabled: bool = False
+    lambda_adv: float = 0.01
+    hidden_dims: List[int] = field(default_factory=lambda: [256, 256])
+    activation: str = "gelu"
+    batch_norm: bool = False
+    dropout: float = 0.0
 
 
 @dataclass
@@ -60,21 +85,62 @@ class NPEModelConfig:
     permutation: Optional[str] = "swap"
     use_actnorm: bool = False
     base_distribution: str = "normal"
+    spline_num_bins: int = 8
+    spline_tail_bound: float = 3.0
+    spline_init_identity: bool = True
 
 
 def _default_npe_network_config() -> NetworkConfig:
     return NetworkConfig(hidden_dims=[128, 128, 128])
 
 
+def _default_tensorproduct_state_network_config() -> NetworkConfig:
+    return NetworkConfig(hidden_dims=[256, 256, 256])
+
+
+def _default_tensorproduct_context_network_config() -> NetworkConfig:
+    return NetworkConfig(hidden_dims=[256, 256])
+
+
+def _default_tensorproduct_decoder_network_config() -> NetworkConfig:
+    return NetworkConfig(hidden_dims=[256, 256, 256])
+
+
+def _default_tensorproduct_koopman_config() -> TensorProductKoopmanModelConfig:
+    return TensorProductKoopmanModelConfig(
+        state_network=_default_tensorproduct_state_network_config(),
+        context_network=_default_tensorproduct_context_network_config(),
+        decoder_network=_default_tensorproduct_decoder_network_config(),
+    )
+
+
+def _default_nsf_model_config() -> NPEModelConfig:
+    return NPEModelConfig(
+        network=_default_npe_network_config(),
+        transform="neural_spline",
+        spline_num_bins=8,
+        spline_tail_bound=3.0,
+        spline_init_identity=True,
+    )
+
+
 def _default_cmpe_network_config() -> NetworkConfig:
-    return NetworkConfig(hidden_dims=[256, 256, 256, 256, 256], activation="relu")
+    return NetworkConfig(
+        hidden_dims=[256, 256, 256, 256, 256],
+        activation="mish",
+        dropout=0.05,
+    )
 
 
 @dataclass
 class ModelSection:
     flow_matching: FlowMatchingModelConfig
     koopman: KoopmanModelConfig
+    tensorproduct_koopman: TensorProductKoopmanModelConfig = field(
+        default_factory=_default_tensorproduct_koopman_config
+    )
     npe: NPEModelConfig = field(default_factory=lambda: NPEModelConfig(network=_default_npe_network_config()))
+    nsf: NPEModelConfig = field(default_factory=_default_nsf_model_config)
     cmpe: CMPEModelConfig = field(default_factory=lambda: CMPEModelConfig(network=_default_cmpe_network_config()))
 
 
@@ -115,7 +181,9 @@ class TrainingConfig:
 class TrainingSection:
     flow_matching: TrainingConfig
     koopman: TrainingConfig
+    tensorproduct_koopman: TrainingConfig = field(default_factory=TrainingConfig)
     npe: TrainingConfig = field(default_factory=TrainingConfig)
+    nsf: TrainingConfig = field(default_factory=TrainingConfig)
     cmpe: TrainingConfig = field(default_factory=TrainingConfig)
 
 
@@ -148,10 +216,13 @@ class EvaluationConfig:
     observations: List[int] = None
     metrics: List[str] = None
     flow_checkpoint_path: Optional[str] = None
+    tensorproduct_koopman_checkpoint_path: Optional[str] = None
     koopman_checkpoint_path: Optional[str] = None
     npe_checkpoint_path: Optional[str] = None
+    nsf_checkpoint_path: Optional[str] = None
     cmpe_checkpoint_path: Optional[str] = None
     include_npe: bool = False
+    include_nsf: bool = False
     save_observation_plots: bool = True
 
     def __post_init__(self) -> None:
@@ -186,6 +257,7 @@ class BenchmarkVariantConfig:
 def _default_benchmark_variants() -> List["BenchmarkVariantConfig"]:
     return [
         BenchmarkVariantConfig(name="npe", model_type="npe"),
+        BenchmarkVariantConfig(name="nsf", model_type="nsf"),
         BenchmarkVariantConfig(
             name="fmnpe_dopri5",
             model_type="flow_matching",
@@ -275,9 +347,37 @@ def _build_dataclass(cls: Type[T], data: Dict[str, Any]) -> T:
     return cls(**values)
 
 
-def load_experiment_config(path: str) -> ExperimentConfig:
+def _deep_merge_config(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if (
+            key in merged
+            and isinstance(merged[key], dict)
+            and isinstance(value, dict)
+        ):
+            merged[key] = _deep_merge_config(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_raw_config(path: Path) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as handle:
         raw_config = yaml.safe_load(handle)
+    if not isinstance(raw_config, dict):
+        raise TypeError(f"Expected YAML mapping in {path}, got {type(raw_config).__name__}")
+    base_config_path = raw_config.pop("base_config", None)
+    if base_config_path is None:
+        return raw_config
+    resolved_base_path = Path(base_config_path)
+    if not resolved_base_path.is_absolute():
+        resolved_base_path = path.parent / resolved_base_path
+    base_config = _load_raw_config(resolved_base_path.resolve())
+    return _deep_merge_config(base_config, raw_config)
+
+
+def load_experiment_config(path: str) -> ExperimentConfig:
+    raw_config = _load_raw_config(Path(path))
     return _build_dataclass(ExperimentConfig, raw_config)
 
 

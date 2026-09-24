@@ -22,6 +22,7 @@ def test_benchmark_suite_reuses_single_flow_model_instance(tiny_config_path):
     original_koopman_load = pipeline_module.KoopmanFlow.load
     original_npe_load = pipeline_module.NormalizingFlowNPE.load
     original_cmpe_load = pipeline_module.ConsistencyModelPosteriorEstimator.load
+    original_load_cmpe_model = pipeline_module._load_cmpe_model
     original_summary = pipeline_module._read_run_summary_from_checkpoint
     try:
         pipeline_module.ConditionalFlowMatching.load = classmethod(lambda cls, path, device: flow_model)
@@ -30,6 +31,7 @@ def test_benchmark_suite_reuses_single_flow_model_instance(tiny_config_path):
         pipeline_module.ConsistencyModelPosteriorEstimator.load = classmethod(
             lambda cls, path, device: cmpe_model
         )
+        pipeline_module._load_cmpe_model = lambda path, device: cmpe_model
         pipeline_module._read_run_summary_from_checkpoint = lambda path: {"best_checkpoint_path": str(path)}
 
         specs = _build_benchmark_suite_specs(
@@ -38,13 +40,15 @@ def test_benchmark_suite_reuses_single_flow_model_instance(tiny_config_path):
             flow_checkpoint=tiny_config_path,
             koopman_checkpoint=tiny_config_path,
             npe_checkpoint=tiny_config_path,
+            nsf_checkpoint=None,
             cmpe_checkpoint=tiny_config_path,
         )
     finally:
-        pipeline_module.ConditionalFlowMatching.load = original_flow_load
-        pipeline_module.KoopmanFlow.load = original_koopman_load
-        pipeline_module.NormalizingFlowNPE.load = original_npe_load
-        pipeline_module.ConsistencyModelPosteriorEstimator.load = original_cmpe_load
+        pipeline_module.ConditionalFlowMatching.load = classmethod(original_flow_load.__func__)
+        pipeline_module.KoopmanFlow.load = classmethod(original_koopman_load.__func__)
+        pipeline_module.NormalizingFlowNPE.load = classmethod(original_npe_load.__func__)
+        pipeline_module.ConsistencyModelPosteriorEstimator.load = classmethod(original_cmpe_load.__func__)
+        pipeline_module._load_cmpe_model = original_load_cmpe_model
         pipeline_module._read_run_summary_from_checkpoint = original_summary
 
     flow_specs = [spec for spec in specs if spec.label.startswith("fmnpe_")]

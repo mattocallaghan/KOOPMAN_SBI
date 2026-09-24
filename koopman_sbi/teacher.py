@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from pathlib import Path
 import time
-from typing import Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -13,6 +15,10 @@ from koopman_sbi.config import ExperimentConfig
 from koopman_sbi.data import DatasetBundle
 from koopman_sbi.paths import resolve_teacher_dir
 from koopman_sbi.runtime import move_tensor_to_device
+
+
+_CACHE_METADATA_FILENAME = "metadata.json"
+_TRAJECTORY_CACHE_VERSION = 1
 
 
 class TeacherTrajectoryDataset(Dataset):
@@ -59,6 +65,77 @@ def _save_trajectories(
     np.save(trajectory_dir / "context.npy", context.numpy())
 
 
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _hash_tensor(tensor: torch.Tensor) -> str:
+    values = tensor.detach().cpu().contiguous()
+    digest = hashlib.sha256()
+    digest.update(str(tuple(values.shape)).encode("utf-8"))
+    digest.update(str(values.dtype).encode("utf-8"))
+    digest.update(values.numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _teacher_model_digest(teacher_model, checkpoint_path: Optional[Path]) -> str:
+    if checkpoint_path is not None and checkpoint_path.exists():
+        return _hash_file(checkpoint_path)
+    digest = hashlib.sha256()
+    for name, parameter in sorted(teacher_model.state_dict().items()):
+        digest.update(name.encode("utf-8"))
+        digest.update(_hash_tensor(parameter).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _trajectory_cache_metadata(
+    config: ExperimentConfig,
+    dataset_bundle: DatasetBundle,
+    teacher_model,
+    teacher_checkpoint_path: Optional[Path],
+) -> Dict[str, Any]:
+    return {
+        "version": _TRAJECTORY_CACHE_VERSION,
+        "task": {
+            "name": config.task.name,
+            "seed": config.task.seed,
+            "num_train_samples": config.task.num_train_samples,
+            "train_fraction": config.task.train_fraction,
+        },
+        "teacher": {
+            "checkpoint_sha256": _teacher_model_digest(teacher_model, teacher_checkpoint_path),
+            "num_samples": config.teacher.num_samples,
+            "num_context": config.teacher.num_context,
+            "batch_size": config.teacher.batch_size,
+        },
+        "dataset": {
+            "theta_sha256": _hash_tensor(dataset_bundle.raw_theta),
+            "x_sha256": _hash_tensor(dataset_bundle.raw_x),
+        },
+    }
+
+
+def _cache_matches(trajectory_dir: Path, expected_metadata: Dict[str, Any]) -> bool:
+    metadata_path = trajectory_dir / _CACHE_METADATA_FILENAME
+    if not metadata_path.exists():
+        return False
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as handle:
+            cached_metadata = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return cached_metadata == expected_metadata
+
+
+def _save_cache_metadata(trajectory_dir: Path, metadata: Dict[str, Any]) -> None:
+    with open(trajectory_dir / _CACHE_METADATA_FILENAME, "w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2, sort_keys=True)
+
+
 def _split_teacher_data(
     noise_state: torch.Tensor,
     theta: torch.Tensor,
@@ -91,6 +168,7 @@ def load_or_generate_teacher_trajectories(
     dataset_bundle: DatasetBundle,
     teacher_model,
     device: torch.device,
+    teacher_checkpoint_path: Optional[Path] = None,
 ) -> TeacherTrajectoryBundle:
     trajectory_dir = resolve_teacher_dir(
         config.logging.output_root,
@@ -100,6 +178,12 @@ def load_or_generate_teacher_trajectories(
     noise_path = trajectory_dir / "noise.npy"
     theta_path = trajectory_dir / "theta.npy"
     context_path = trajectory_dir / "context.npy"
+    cache_metadata = _trajectory_cache_metadata(
+        config=config,
+        dataset_bundle=dataset_bundle,
+        teacher_model=teacher_model,
+        teacher_checkpoint_path=teacher_checkpoint_path,
+    )
 
     start_time = time.time()
     if (
@@ -107,6 +191,7 @@ def load_or_generate_teacher_trajectories(
         and noise_path.exists()
         and theta_path.exists()
         and context_path.exists()
+        and _cache_matches(trajectory_dir, cache_metadata)
     ):
         noise_state, theta, context = _load_trajectories(trajectory_dir)
         loaded_from_cache = True
@@ -130,7 +215,18 @@ def load_or_generate_teacher_trajectories(
                     generator=generator,
                 )
                 context_batch = move_tensor_to_device(context_pool[indices], device)
-                noise_batch = teacher_model.sample_base_noise(current_batch)
+                noise_generator = torch.Generator().manual_seed(
+                    config.task.seed + total_samples + start
+                )
+                noise_batch = move_tensor_to_device(
+                    torch.randn(
+                        current_batch,
+                        teacher_model.input_dim,
+                        generator=noise_generator,
+                        dtype=torch.float32,
+                    ),
+                    device,
+                )
                 theta_batch = teacher_model.sample_batch(context_batch, initial_noise=noise_batch)
                 noise_batches.append(noise_batch.detach().cpu())
                 theta_batches.append(theta_batch.detach().cpu())
@@ -140,6 +236,7 @@ def load_or_generate_teacher_trajectories(
         context = torch.cat(context_batches, dim=0)
         if config.teacher.cache_trajectories:
             _save_trajectories(trajectory_dir, noise_state, theta, context)
+            _save_cache_metadata(trajectory_dir, cache_metadata)
     generation_time_seconds = time.time() - start_time
 
     train_dataset, val_dataset = _split_teacher_data(

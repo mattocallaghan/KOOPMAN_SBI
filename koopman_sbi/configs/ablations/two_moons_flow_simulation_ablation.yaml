@@ -1,0 +1,4 @@
+base_config: "../tasks/two_moons.yaml"
+output_root: "logs/ablations/flow_simulation"
+num_train_samples: [100, 1000, 10000, 100000]
+save_observation_plots: false

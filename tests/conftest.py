@@ -82,6 +82,27 @@ if "normflows" not in sys.modules:
         def forward(self, theta, context):
             return self.linear(torch.cat([theta, context], dim=-1))
 
+    class _AutoregressiveRationalQuadraticSpline(torch.nn.Module):
+        def __init__(
+            self,
+            num_input_channels,
+            num_blocks,
+            num_hidden_channels,
+            num_context_channels=None,
+            num_bins=8,
+            tail_bound=3.0,
+            activation=None,
+            dropout_probability=0.0,
+            permute_mask=False,
+            init_identity=True,
+        ):
+            super().__init__()
+            del num_blocks, num_hidden_channels, num_bins, tail_bound, activation, dropout_probability, permute_mask, init_identity
+            self.linear = torch.nn.Linear(num_input_channels + int(num_context_channels or 0), num_input_channels)
+
+        def forward(self, theta, context):
+            return self.linear(torch.cat([theta, context], dim=-1))
+
     class _Permute(torch.nn.Module):
         def __init__(self, features, mode="swap"):
             super().__init__()
@@ -116,6 +137,7 @@ if "normflows" not in sys.modules:
 
     distributions = types.SimpleNamespace(base=types.SimpleNamespace(DiagGaussian=_DiagGaussian))
     flows = types.SimpleNamespace(
+        AutoregressiveRationalQuadraticSpline=_AutoregressiveRationalQuadraticSpline,
         MaskedAffineAutoregressive=_MaskedAffineAutoregressive,
         Permute=_Permute,
     )

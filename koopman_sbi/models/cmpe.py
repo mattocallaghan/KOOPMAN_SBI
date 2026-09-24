@@ -4,11 +4,10 @@ import math
 from typing import Any, Dict, Optional
 
 import torch
-import torch.nn as nn
 
 from koopman_sbi.config import CMPEModelConfig, NetworkConfig
 from koopman_sbi.models.base import BasePosteriorModel
-from koopman_sbi.models.networks import DenseResidualNet
+from koopman_sbi.models.networks import TimeConditionedMLP
 from koopman_sbi.runtime import move_tensor_to_device
 
 
@@ -26,19 +25,22 @@ class ConsistencyModelPosteriorEstimator(BasePosteriorModel):
         self.model_config = model_config
         self.device = device
         network_cfg = model_config.network
-        self.student = DenseResidualNet(
-            input_dim=input_dim + context_dim + 1,
-            output_dim=input_dim,
-            hidden_dims=network_cfg.hidden_dims,
+        self.student = TimeConditionedMLP(
+            input_dim=input_dim,
+            condition_dim=context_dim,
+            widths=network_cfg.hidden_dims,
+            time_embedding_dim=32,
+            fourier_scale=30.0,
             activation=network_cfg.activation,
-            batch_norm=network_cfg.batch_norm,
+            residual=True,
             dropout=network_cfg.dropout,
-            theta_dim=input_dim,
-            context_dim=context_dim,
-            time_dim=1,
-            theta_with_glu=network_cfg.theta_with_glu,
-            context_with_glu=network_cfg.context_with_glu,
+            norm="layer",
+            merge="concat",
+            film_use_gamma=False,
         )
+        self.output_projector = torch.nn.Linear(network_cfg.hidden_dims[-1], input_dim)
+        torch.nn.init.xavier_uniform_(self.output_projector.weight)
+        torch.nn.init.zeros_(self.output_projector.bias)
         self.current_step = 0
         self.total_training_steps = 1
         sigma2 = torch.full(
@@ -64,8 +66,8 @@ class ConsistencyModelPosteriorEstimator(BasePosteriorModel):
     def _student_forward(self, x: torch.Tensor, context: torch.Tensor, time: torch.Tensor) -> torch.Tensor:
         if time.dim() == 1:
             time = time.unsqueeze(1)
-        model_input = torch.cat([x, context, time], dim=-1)
-        return self.student(model_input)
+        hidden = self.student(x, time / float(self.model_config.t_max), context)
+        return self.output_projector(hidden)
 
     def consistency_function(self, x: torch.Tensor, context: torch.Tensor, time: torch.Tensor) -> torch.Tensor:
         if time.dim() == 1:
@@ -78,12 +80,14 @@ class ConsistencyModelPosteriorEstimator(BasePosteriorModel):
         cout = sigma * (time - eps) / torch.sqrt(sigma2 + time**2)
         return cskip * x + cout * network_out
 
-    def _schedule_discretization(self) -> int:
+    def _schedule_discretization(self, step_index: Optional[int] = None) -> int:
+        if step_index is None:
+            step_index = self.current_step
         s0 = float(self.model_config.s0)
         s1 = float(self.model_config.s1)
         log_ratio = math.log(max(s1 / s0, 1.0), 2.0) if s1 > s0 else 0.0
         k_prime = max(int(math.floor(self.total_training_steps / (log_ratio + 1.0))), 1)
-        value = min(s0 * (2.0 ** math.floor(self.current_step / k_prime)), s1) + 1.0
+        value = min(s0 * (2.0 ** math.floor(step_index / k_prime)), s1) + 1.0
         return int(value)
 
     def _discretize_time(self, num_steps: int) -> torch.Tensor:
@@ -98,8 +102,12 @@ class ConsistencyModelPosteriorEstimator(BasePosteriorModel):
             + ((steps - 1.0) / (n_value - 1.0)) * (t_max**one_over_rho - eps**one_over_rho)
         ) ** rho
 
-    def _sample_neighboring_times(self, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
-        n_current = self._schedule_discretization()
+    def _sample_neighboring_times(
+        self,
+        batch_size: int,
+        step_index: Optional[int] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        n_current = self._schedule_discretization(step_index=step_index)
         discretized_time = self._discretize_time(n_current)
         p_mean = float(self.model_config.p_mean)
         p_std = float(self.model_config.p_std)
@@ -120,12 +128,56 @@ class ConsistencyModelPosteriorEstimator(BasePosteriorModel):
         c_huber2 = c_huber * c_huber
         return torch.sqrt(difference.square() + c_huber2) - c_huber
 
-    def compute_loss(self, batch: Any) -> Dict[str, torch.Tensor]:
-        theta_target, context = batch
+    def _unpack_batch(
+        self,
+        batch: Any,
+        sample_weight: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        if isinstance(batch, dict):
+            theta_target = batch["theta"]
+            context = batch["context"]
+            if sample_weight is None:
+                sample_weight = batch.get("sample_weight")
+            return theta_target, context, sample_weight
+        if isinstance(batch, (tuple, list)):
+            if len(batch) == 2:
+                theta_target, context = batch
+                return theta_target, context, sample_weight
+            if len(batch) == 3:
+                theta_target, context, batch_weight = batch
+                if sample_weight is None:
+                    sample_weight = batch_weight
+                return theta_target, context, sample_weight
+        raise TypeError("CMPE expects batch to be a dict or a tuple/list of length 2 or 3.")
+
+    def _weighted_mean(
+        self,
+        loss: torch.Tensor,
+        sample_weight: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if sample_weight is None:
+            return loss.mean()
+        weight = sample_weight.to(device=loss.device, dtype=loss.dtype)
+        while weight.dim() < loss.dim():
+            weight = weight.unsqueeze(-1)
+        weighted_loss = loss * weight
+        denominator = torch.clamp(weight.sum(), min=1e-12)
+        return weighted_loss.sum() / denominator
+
+    def compute_loss(
+        self,
+        batch: Any,
+        *,
+        stage: str = "training",
+        sample_weight: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        theta_target, context, sample_weight = self._unpack_batch(batch, sample_weight=sample_weight)
         batch_size = theta_target.shape[0]
-        self.current_step += 1
+        if stage == "training":
+            self.current_step = min(self.current_step + 1, self.total_training_steps - 1)
+        step_index = self.current_step
         z = self.sample_base_noise(batch_size)
-        t1, t2 = self._sample_neighboring_times(batch_size)
+        t1, t2 = self._sample_neighboring_times(batch_size, step_index=step_index)
         x_t1 = theta_target + t1 * z
         x_t2 = theta_target + t2 * z
         with torch.no_grad():
@@ -133,7 +185,7 @@ class ConsistencyModelPosteriorEstimator(BasePosteriorModel):
         student_out = self.consistency_function(x_t2, context, t2)
         lam = 1.0 / torch.clamp(t2 - t1, min=1e-12)
         loss = lam * self._pseudo_huber(teacher_out - student_out)
-        consistency_loss = loss.mean()
+        consistency_loss = self._weighted_mean(loss, sample_weight)
         return {
             "total_loss": consistency_loss,
             "consistency_loss": consistency_loss,
@@ -212,11 +264,11 @@ class ConsistencyModelPosteriorEstimator(BasePosteriorModel):
         model_config_dict = checkpoint["model_config"]
         model_config = CMPEModelConfig(
             eps=model_config_dict.get("eps", 1e-3),
-            t_max=model_config_dict.get("t_max", 200.0),
+            t_max=model_config_dict.get("t_max", 80.0),
             rho=model_config_dict.get("rho", 7.0),
             sigma_data=model_config_dict.get("sigma_data", 1.0),
             s0=model_config_dict.get("s0", 10),
-            s1=model_config_dict.get("s1", 50),
+            s1=model_config_dict.get("s1", 150),
             p_mean=model_config_dict.get("p_mean", -1.1),
             p_std=model_config_dict.get("p_std", 2.0),
             default_num_steps=model_config_dict.get("default_num_steps", 10),

@@ -21,13 +21,13 @@ model:
       theta_with_glu: false
       context_with_glu: false
   koopman:
-    lifting_dim: 256
+    lifting_dim: 448
     lambda_rec: 1.0
     lambda_lat: 1.0
     lambda_pred: 1.0
     network:
       type: "DenseResidualNet"
-      hidden_dims: [64, 256, 1024, 256, 64]
+      hidden_dims: [88, 360, 1432, 360, 88]
       activation: "gelu"
       batch_norm: false
       dropout: 0.0
@@ -35,14 +35,35 @@ model:
       context_with_glu: false
   npe:
     backend: "normflows"
-    num_coupling_layers: 6
+    num_coupling_layers: 16
     transform: "affine"
     permutation: "swap"
     use_actnorm: false
     base_distribution: "normal"
+    spline_num_bins: 8
+    spline_tail_bound: 3.0
+    spline_init_identity: true
     network:
       type: "DenseResidualNet"
-      hidden_dims: [128, 128, 128]
+      hidden_dims: [136, 136, 136, 136]
+      activation: "gelu"
+      batch_norm: false
+      dropout: 0.0
+      theta_with_glu: false
+      context_with_glu: false
+  nsf:
+    backend: "normflows"
+    num_coupling_layers: 18
+    transform: "neural_spline"
+    permutation: "swap"
+    use_actnorm: false
+    base_distribution: "normal"
+    spline_num_bins: 8
+    spline_tail_bound: 3.0
+    spline_init_identity: true
+    network:
+      type: "DenseResidualNet"
+      hidden_dims: [176, 176]
       activation: "gelu"
       batch_norm: false
       dropout: 0.0
@@ -139,6 +160,27 @@ training:
       patience: 5
       step_size: 10
       gamma: 0.5
+  nsf:
+    batch_size: 128
+    epochs: 20
+    num_workers: 0
+    device: "auto"
+    early_stopping: true
+    patience: 10
+    early_stopping_min_delta: 0.005
+    gradient_clip_norm: null
+    precision: "float32"
+    use_tensorboard: true
+    optimizer:
+      name: "Adam"
+      lr: 0.0005
+      weight_decay: 0.0
+    scheduler:
+      type: "reduce_on_plateau"
+      factor: 0.5
+      patience: 5
+      step_size: 10
+      gamma: 0.5
   cmpe:
     batch_size: 128
     epochs: 20
@@ -163,13 +205,15 @@ training:
 
 evaluation:
   num_posterior_samples: 1000
-  observations: [1, 2, 3]
+  observations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
   metrics: ["c2st", "mmd", "posterior_mean_error", "posterior_variance_ratio"]
   flow_checkpoint_path: "logs/two_moons/last_model/train_flow/best_model.pt"
   koopman_checkpoint_path: "logs/two_moons/last_model/distill_koopman/best_model.pt"
   npe_checkpoint_path: "logs/two_moons/last_model/train_npe/best_model.pt"
+  nsf_checkpoint_path: "logs/two_moons/last_model/train_nsf/best_model.pt"
   cmpe_checkpoint_path: "logs/two_moons/last_model/train_cmpe/best_model.pt"
   include_npe: false
+  include_nsf: false
   save_observation_plots: true
 
 logging:
@@ -185,6 +229,9 @@ benchmark_suite:
   variants:
     - name: "npe"
       model_type: "npe"
+      sample_kwargs: {}
+    - name: "nsf"
+      model_type: "nsf"
       sample_kwargs: {}
     - name: "fmnpe_dopri5"
       model_type: "flow_matching"

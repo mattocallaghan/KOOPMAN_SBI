@@ -86,8 +86,27 @@ class Trainer:
         self.training_config = training_config
         self.run_paths = run_paths
         self.logger = logger
-        self.model.optimizer = build_optimizer(model.parameters(), training_config.optimizer)
+        self.discriminator_optimizer = None
+        self.discriminator_scheduler = None
+        discriminator = getattr(self.model, "discriminator", None)
+        generator_parameters = (
+            model.generator_parameters()
+            if hasattr(model, "generator_parameters")
+            else model.parameters()
+        )
+        self.model.optimizer = build_optimizer(generator_parameters, training_config.optimizer)
         self.model.scheduler = build_scheduler(self.model.optimizer, training_config.scheduler)
+        if discriminator is not None:
+            discriminator_parameters = (
+                model.discriminator_parameters()
+                if hasattr(model, "discriminator_parameters")
+                else discriminator.parameters()
+            )
+            self.discriminator_optimizer = build_optimizer(discriminator_parameters, training_config.optimizer)
+            self.discriminator_scheduler = build_scheduler(
+                self.discriminator_optimizer,
+                training_config.scheduler,
+            )
 
     def _run_epoch(self, dataloader: DataLoader, train: bool) -> Dict[str, float]:
         if train:
@@ -100,16 +119,24 @@ class Trainer:
         for batch in dataloader:
             batch = move_batch_to_device(batch, self.model.device)
             with torch.set_grad_enabled(train):
-                loss_dict = self.model.compute_loss(batch)
-                if train:
-                    self.model.optimizer.zero_grad()
-                    loss_dict["total_loss"].backward()
-                    if self.training_config.gradient_clip_norm is not None:
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(),
-                            self.training_config.gradient_clip_norm,
-                        )
-                    self.model.optimizer.step()
+                if train and hasattr(self.model, "train_batch"):
+                    loss_dict = self.model.train_batch(
+                        batch,
+                        optimizer=self.model.optimizer,
+                        discriminator_optimizer=self.discriminator_optimizer,
+                        gradient_clip_norm=self.training_config.gradient_clip_norm,
+                    )
+                else:
+                    loss_dict = self.model.compute_loss(batch, stage="training" if train else "validation")
+                    if train:
+                        self.model.optimizer.zero_grad()
+                        loss_dict["total_loss"].backward()
+                        if self.training_config.gradient_clip_norm is not None:
+                            torch.nn.utils.clip_grad_norm_(
+                                self.model.parameters(),
+                                self.training_config.gradient_clip_norm,
+                            )
+                        self.model.optimizer.step()
             for key, value in loss_dict.items():
                 metrics_accumulator[key] = metrics_accumulator.get(key, 0.0) + float(to_python_scalar(value))
             num_batches += 1
@@ -133,6 +160,11 @@ class Trainer:
                 self.model.scheduler.step(val_metrics["total_loss"])
             else:
                 self.model.scheduler.step()
+            if self.discriminator_scheduler is not None:
+                if isinstance(self.discriminator_scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                    self.discriminator_scheduler.step(val_metrics["total_loss"])
+                else:
+                    self.discriminator_scheduler.step()
 
             learning_rate = self.model.optimizer.param_groups[0]["lr"]
             record = {

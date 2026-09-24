@@ -4,9 +4,14 @@ import csv
 from dataclasses import dataclass, field
 import json
 import math
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Tuple
+
+_MPL_CONFIG_DIR = Path.cwd() / ".cache" / "matplotlib"
+_MPL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CONFIG_DIR))
 
 import matplotlib
 
@@ -37,6 +42,13 @@ SAMPLE_METRICS = {
 }
 
 
+def _synchronize_device(device: torch.device) -> None:
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+    elif device.type == "mps" and torch.backends.mps.is_available():
+        torch.mps.synchronize()
+
+
 @dataclass
 class BenchmarkModelSpec:
     label: str
@@ -46,12 +58,9 @@ class BenchmarkModelSpec:
 
 
 def _filter_to_prior_support(task, samples: torch.Tensor, device: torch.device) -> Tuple[torch.Tensor, float]:
-    if device.type == "mps":
-        log_prob = task.prior_dist.log_prob(samples.cpu())
-        mask = torch.isfinite(log_prob)
-        mask_device = mask.to(device)
-    else:
-        mask_device = torch.isfinite(task.prior_dist.log_prob(samples))
+    log_prob = task.prior_dist.log_prob(samples.detach().cpu())
+    mask = torch.isfinite(log_prob)
+    mask_device = mask.to(device)
     filtered_samples = samples[mask_device]
     acceptance_rate = float(mask_device.float().mean().item())
     return filtered_samples, acceptance_rate
@@ -99,6 +108,13 @@ def evaluate_model(
     speed_values: List[float] = []
     sample_kwargs = sample_kwargs or {}
 
+    # Exclude one-time kernel setup and allocator costs from model comparisons.
+    warmup_observation = task.get_observation(num_observation=config.evaluation.observations[0]).float()
+    warmup_context = dataset_bundle.standardizer.standardize_x(warmup_observation).repeat((2, 1))
+    with torch.no_grad():
+        model.sample_batch(warmup_context, **sample_kwargs)
+    _synchronize_device(model.device)
+
     for obs in config.evaluation.observations:
         reference_samples = task.get_reference_posterior_samples(num_observation=obs)
         observation = task.get_observation(num_observation=obs).float()
@@ -106,9 +122,11 @@ def evaluate_model(
         context = standardized_observation.repeat((config.evaluation.num_posterior_samples * 2, 1))
         num_generated_samples = int(len(context))
 
-        start_time = time.time()
+        _synchronize_device(model.device)
+        start_time = time.perf_counter()
         posterior_standardized = model.sample_batch(context, **sample_kwargs)
-        sampling_time_ms = (time.time() - start_time) * 1000.0
+        _synchronize_device(model.device)
+        sampling_time_ms = (time.perf_counter() - start_time) * 1000.0
         posterior_samples = dataset_bundle.standardizer.inverse_theta(posterior_standardized)
         posterior_samples, acceptance_rate = _filter_to_prior_support(task, posterior_samples, model.device)
         sample_count = min(len(reference_samples), len(posterior_samples))
@@ -245,6 +263,46 @@ def benchmark_models(
     return model_results
 
 
+def regenerate_benchmark_plots(
+    benchmark_dir: Path,
+    config: ExperimentConfig,
+    logger: ExperimentLogger | None = None,
+) -> None:
+    model_results: Dict[str, object] = {}
+    for summary_path in sorted(benchmark_dir.glob("*/*_summary.json")):
+        model_name = summary_path.parent.name
+        with open(summary_path, "r", encoding="utf-8") as handle:
+            summary = json.load(handle)
+        model_results[model_name] = {
+            "summary": summary,
+            "per_observation": [],
+            "posterior_cache": {},
+            "reference_cache": {},
+        }
+    if not model_results:
+        raise FileNotFoundError(f"No saved benchmark summaries found under {benchmark_dir}")
+
+    _plot_spider_comparison(model_results, config.evaluation.metrics, benchmark_dir / "benchmark_spider.png")
+
+    manifest_path = benchmark_dir / "benchmark_manifest.json"
+    if manifest_path.exists():
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        timing_metadata = {entry["label"]: entry.get("timing_metadata", {}) for entry in manifest}
+        _write_worth_it_analysis(
+            model_results=model_results,
+            timing_metadata=timing_metadata,
+            teacher_num_samples=config.teacher.num_samples,
+            output_dir=benchmark_dir,
+        )
+    if logger is not None:
+        logger.log_image("benchmark_spider", benchmark_dir / "benchmark_spider.png")
+        if (benchmark_dir / "worth_it_curve.png").exists():
+            logger.log_image("worth_it_curve", benchmark_dir / "worth_it_curve.png")
+        if (benchmark_dir / "worth_it_inference_curve.png").exists():
+            logger.log_image("worth_it_inference_curve", benchmark_dir / "worth_it_inference_curve.png")
+
+
 def _normalize_benchmark_specs(
     models: Dict[str, object] | List[BenchmarkModelSpec],
     timing_metadata: Dict[str, Dict[str, float | int | bool]] | None,
@@ -307,46 +365,54 @@ def _plot_spider_comparison(model_results: Dict[str, object], metric_names: List
 
     transformed_values: Dict[str, Dict[str, float]] = {}
     axis_ranges: Dict[str, tuple[float, float]] = {}
+    ideal_values: Dict[str, float] = {}
     for metric_name, values in raw_values.items():
         transformed_values[metric_name] = {}
         if metric_name == "c2st":
-            axis_ranges[metric_name] = (0.5, 1.0)
             for model_name, raw_value in values.items():
                 transformed_values[metric_name][model_name] = float(np.clip(raw_value, 0.5, 1.0))
+            worst_value = min(1.0, max(transformed_values[metric_name].values()) + 0.05)
+            axis_ranges[metric_name] = (0.5, worst_value)
+            ideal_values[metric_name] = 0.5
         elif metric_name == "posterior_mean_error":
-            axis_ranges[metric_name] = (0.0, 1.0)
             for model_name, raw_value in values.items():
-                transformed_values[metric_name][model_name] = float(np.clip(abs(raw_value), 0.0, 1.0))
+                transformed_values[metric_name][model_name] = float(abs(raw_value))
+            axis_ranges[metric_name] = (0.0, max(transformed_values[metric_name].values()))
+            ideal_values[metric_name] = 0.0
         elif metric_name == "posterior_variance_ratio":
-            axis_ranges[metric_name] = (0.0, 1.0)
             for model_name, raw_value in values.items():
                 safe_value = max(raw_value, 1e-12)
-                transformed_values[metric_name][model_name] = float(np.clip(abs(np.log(safe_value)), 0.0, 1.0))
+                transformed_values[metric_name][model_name] = float(abs(np.log(safe_value)))
+            axis_ranges[metric_name] = (0.0, max(transformed_values[metric_name].values()))
+            ideal_values[metric_name] = 0.0
         elif metric_name == "mmd":
-            axis_ranges[metric_name] = (0.0, 0.1)
             for model_name, raw_value in values.items():
-                transformed_values[metric_name][model_name] = float(np.clip(raw_value, 0.0, 0.1))
+                transformed_values[metric_name][model_name] = float(max(raw_value, 0.0))
+            axis_ranges[metric_name] = (0.0, max(transformed_values[metric_name].values()))
+            ideal_values[metric_name] = 0.0
         elif metric_name == "sampling_time_ms":
-            axis_ranges[metric_name] = (0.0, 3.0)
             for model_name, raw_value in values.items():
-                transformed_values[metric_name][model_name] = float(np.clip(np.log10(max(raw_value, 1e-12)), 0.0, 3.0))
+                transformed_values[metric_name][model_name] = float(np.log10(max(raw_value, 1e-12)))
+            axis_ranges[metric_name] = (0.0, max(transformed_values[metric_name].values()))
+            ideal_values[metric_name] = 0.0
         else:
             metric_min = min(values.values())
             metric_max = max(values.values())
             axis_ranges[metric_name] = (metric_min, metric_max if metric_max > metric_min else metric_min + 1.0)
+            ideal_values[metric_name] = metric_min
             for model_name, raw_value in values.items():
                 transformed_values[metric_name][model_name] = float(raw_value)
 
     normalized_values: Dict[str, Dict[str, float]] = {}
     for metric_name, values in transformed_values.items():
-        metric_min, metric_max = axis_ranges[metric_name]
-        metric_range = metric_max - metric_min
+        ideal_value, worst_value = axis_ranges[metric_name]
+        metric_range = abs(worst_value - ideal_value)
         normalized_values[metric_name] = {}
         for model_name, raw_value in values.items():
             if metric_range <= 1e-12:
-                score = 0.5
+                score = 0.0
             else:
-                score = (raw_value - metric_min) / metric_range
+                score = (raw_value - ideal_value) / metric_range
             normalized_values[metric_name][model_name] = float(score)
 
     model_names = list(model_results.keys())
@@ -356,14 +422,28 @@ def _plot_spider_comparison(model_results: Dict[str, object], metric_names: List
     angles += angles[:1]
 
     fig, ax = plt.subplots(figsize=(8, 8), subplot_kw={"polar": True})
-    colors = {"flow_matching": "tab:blue", "koopman": "tab:orange", "npe": "tab:green"}
     linestyles = {"flow_matching": "-", "koopman": "--", "npe": "-."}
+    fixed_colors = {"koopman": "#8B0000"}
+    dynamic_model_names = [model_name for model_name in model_names if model_name not in fixed_colors]
+    if len(dynamic_model_names) <= 20:
+        palette = [tuple(color) for color in plt.cm.tab20(np.linspace(0.0, 1.0, len(dynamic_model_names)))]
+    else:
+        palette = [
+            tuple(color)
+            for color in plt.cm.hsv(np.linspace(0.0, 1.0, len(dynamic_model_names), endpoint=False))
+        ]
+    assigned_colors: Dict[str, tuple[float, float, float] | str] = {
+        model_name: palette[index] for index, model_name in enumerate(dynamic_model_names)
+    }
+    for model_name, color in fixed_colors.items():
+        if model_name in model_names:
+            assigned_colors[model_name] = color
     for model_index, model_name in enumerate(model_names):
         if any(model_name not in normalized_values[metric_name] for metric_name in metric_order):
             continue
         scores = [normalized_values[metric_name][model_name] for metric_name in metric_order]
         scores += scores[:1]
-        color = colors.get(model_name, plt.cm.tab10.colors[model_index % len(plt.cm.tab10.colors)])
+        color = assigned_colors[model_name]
         ax.plot(
             angles,
             scores,
@@ -380,8 +460,8 @@ def _plot_spider_comparison(model_results: Dict[str, object], metric_names: List
     axis_labels = []
     for metric_name in metric_order:
         label = metric_labels.get(metric_name, metric_name.replace("_", " "))
-        lower, upper = axis_ranges[metric_name]
-        formatted_range = f"{lower:.3g}–{upper:.3g}"
+        ideal_value, worst_value = axis_ranges[metric_name]
+        formatted_range = f"{ideal_value:.3g}–{worst_value:.3g}"
         axis_labels.append(f"{label}\n({formatted_range})")
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels(axis_labels)

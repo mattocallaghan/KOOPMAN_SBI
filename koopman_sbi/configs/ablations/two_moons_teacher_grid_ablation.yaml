@@ -1,0 +1,5 @@
+base_config: "../tasks/two_moons.yaml"
+output_root: "logs/ablations/teacher_grid"
+teacher_num_samples: [100, 1000, 10000, 100000]
+teacher_context_ratios: [0.1, 0.2, 0.5, 0.8]
+save_observation_plots: false

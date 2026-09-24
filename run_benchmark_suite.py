@@ -18,6 +18,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional directory containing per-task YAML configs. Defaults to `koopman_sbi/configs/tasks`.",
     )
+    parser.add_argument(
+        "--plots-only",
+        action="store_true",
+        help="Regenerate benchmark-suite plots from saved artifacts without recomputing benchmarks.",
+    )
+    parser.add_argument(
+        "--force-retrain",
+        action="store_true",
+        help="Retrain requested benchmark models from scratch for this task before benchmarking.",
+    )
     return parser
 
 
@@ -31,7 +41,11 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     config_path = _resolve_config_argument(args)
-    run_benchmark_suite(config_path)
+    run_benchmark_suite(
+        config_path,
+        plots_only=bool(args.plots_only),
+        force_retrain=bool(args.force_retrain),
+    )
 
 
 if __name__ == "__main__":

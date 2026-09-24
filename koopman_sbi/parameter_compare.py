@@ -8,7 +8,12 @@ import sbibm
 import torch
 
 from koopman_sbi.config import ExperimentConfig, load_experiment_config, resolve_task_config_path
-from koopman_sbi.models import ConditionalFlowMatching, KoopmanFlow, NormalizingFlowNPE
+from koopman_sbi.models import (
+    ConditionalFlowMatching,
+    KoopmanFlow,
+    NormalizingFlowNPE,
+    TensorProductKoopmanFlow,
+)
 from koopman_sbi.runtime import detect_device
 
 
@@ -55,7 +60,9 @@ def build_models_for_config(config: ExperimentConfig) -> list[tuple[str, int, in
     theta_dim, x_dim = _infer_dimensions(config.task.name)
     flow_device = detect_device(config.training.flow_matching.device)
     koopman_device = detect_device(config.training.koopman.device)
+    tensorproduct_device = detect_device(config.training.tensorproduct_koopman.device)
     npe_device = detect_device(config.training.npe.device)
+    nsf_device = detect_device(config.training.nsf.device)
 
     flow_model = ConditionalFlowMatching(
         input_dim=theta_dim,
@@ -69,17 +76,31 @@ def build_models_for_config(config: ExperimentConfig) -> list[tuple[str, int, in
         model_config=config.model.koopman,
         device=koopman_device,
     )
+    tensorproduct_model = TensorProductKoopmanFlow(
+        input_dim=theta_dim,
+        context_dim=x_dim,
+        model_config=config.model.tensorproduct_koopman,
+        device=tensorproduct_device,
+    )
     npe_model = NormalizingFlowNPE(
         input_dim=theta_dim,
         context_dim=x_dim,
         model_config=config.model.npe,
         device=npe_device,
     )
+    nsf_model = NormalizingFlowNPE(
+        input_dim=theta_dim,
+        context_dim=x_dim,
+        model_config=config.model.nsf,
+        device=nsf_device,
+    )
 
     return [
         ("flow_matching", *_count_torch_parameters(flow_model)),
         ("koopman", *_count_torch_parameters(koopman_model)),
+        ("tensorproduct_koopman", *_count_torch_parameters(tensorproduct_model)),
         ("npe", *_count_torch_parameters(npe_model)),
+        ("nsf", *_count_torch_parameters(nsf_model)),
     ]
 
 

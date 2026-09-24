@@ -14,7 +14,7 @@ class BasePosteriorModel(nn.Module, ABC):
         self.scheduler = None
 
     @abstractmethod
-    def compute_loss(self, batch: Any) -> Dict[str, torch.Tensor]:
+    def compute_loss(self, batch: Any, **kwargs: Any) -> Dict[str, torch.Tensor]:
         raise NotImplementedError
 
     @abstractmethod
