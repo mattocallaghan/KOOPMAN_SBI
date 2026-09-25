@@ -28,6 +28,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Retrain requested benchmark models from scratch for this task before benchmarking.",
     )
+    parser.add_argument(
+        "--train-flow-matching",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override benchmark_suite.train_flow_matching for this run.",
+    )
+    parser.add_argument(
+        "--generate-teacher",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override teacher.generate_trajectories for this run.",
+    )
     return parser
 
 
@@ -45,6 +57,8 @@ def main() -> None:
         config_path,
         plots_only=bool(args.plots_only),
         force_retrain=bool(args.force_retrain),
+        train_flow_matching=args.train_flow_matching,
+        generate_teacher=args.generate_teacher,
     )
 
 

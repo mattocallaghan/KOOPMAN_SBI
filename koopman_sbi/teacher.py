@@ -196,6 +196,12 @@ def load_or_generate_teacher_trajectories(
         noise_state, theta, context = _load_trajectories(trajectory_dir)
         loaded_from_cache = True
     else:
+        if not config.teacher.generate_trajectories:
+            raise FileNotFoundError(
+                "Teacher trajectories were not found in the cache, and "
+                "teacher.generate_trajectories is false. Enable teacher.generate_trajectories "
+                f"or provide a valid cached trajectory directory at {trajectory_dir}."
+            )
         loaded_from_cache = False
         context_pool = _select_context_pool(dataset_bundle, config.teacher.num_context, config.task.seed)
         teacher_model.eval()

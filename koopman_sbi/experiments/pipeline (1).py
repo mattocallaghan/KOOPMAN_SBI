@@ -20,7 +20,6 @@ from koopman_sbi.models import (
     ConsistencyModelPosteriorEstimator,
     KoopmanFlow,
     NormalizingFlowNPE,
-    TensorProductKoopmanFlow,
 )
 from koopman_sbi.paths import RunPaths, prepare_run_directories, resolve_existing_run_dir
 from koopman_sbi.runtime import detect_device, set_global_seed
@@ -178,32 +177,6 @@ def _resolve_npe_checkpoint(config: ExperimentConfig, config_path: str) -> Path:
     raise FileNotFoundError("No NPE checkpoint is available.")
 
 
-def _resolve_nsf_checkpoint(config: ExperimentConfig, config_path: str) -> Path:
-    if config.evaluation.nsf_checkpoint_path and Path(config.evaluation.nsf_checkpoint_path).exists():
-        return Path(config.evaluation.nsf_checkpoint_path)
-    last_model_candidate = (
-        Path(config.logging.output_root)
-        / config.task.name
-        / "last_model"
-        / "train_nsf"
-        / "best_model.pt"
-    )
-    if last_model_candidate.exists():
-        return last_model_candidate
-    if config.logging.run_name:
-        candidate = (
-            Path(config.logging.output_root)
-            / config.task.name
-            / "train_nsf"
-            / config.logging.run_name
-            / "checkpoints"
-            / "best_model.pt"
-        )
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError("No NSF checkpoint is available.")
-
-
 def _resolve_cmpe_checkpoint(config: ExperimentConfig, config_path: str) -> Path:
     if config.evaluation.cmpe_checkpoint_path and Path(config.evaluation.cmpe_checkpoint_path).exists():
         return Path(config.evaluation.cmpe_checkpoint_path)
@@ -261,7 +234,7 @@ def _resolve_teacher_checkpoint(config: ExperimentConfig, config_path: str) -> P
         )
         if candidate.exists():
             return candidate
-    if not config.teacher.auto_train_if_missing or not config.benchmark_suite.train_flow_matching:
+    if not config.teacher.auto_train_if_missing:
         raise FileNotFoundError("Teacher checkpoint is required but was not provided.")
     flow_artifacts = run_train_flow(config_path)
     return flow_artifacts.checkpoint_path
@@ -290,7 +263,6 @@ def run_distill_koopman(config_path: str) -> ExperimentArtifacts:
         dataset_bundle=dataset_bundle,
         teacher_model=teacher_model,
         device=device,
-        teacher_checkpoint_path=teacher_checkpoint,
     )
     koopman_model = KoopmanFlow(
         input_dim=dataset_bundle.dim_theta,
@@ -339,74 +311,6 @@ def run_train_koopman(config_path: str) -> ExperimentArtifacts:
     return run_distill_koopman(config_path)
 
 
-def run_train_tensorproduct_koopman(config_path: str) -> ExperimentArtifacts:
-    run_start_time = time.time()
-    config = _load_config(config_path)
-    set_global_seed(config.task.seed)
-    device = detect_device(config.training.tensorproduct_koopman.device)
-    dataset_bundle = load_or_generate_dataset(config)
-    teacher_checkpoint = _resolve_teacher_checkpoint(config, config_path)
-    teacher_model = ConditionalFlowMatching.load(str(teacher_checkpoint), device=device)
-
-    run_paths = prepare_run_directories(
-        output_root=config.logging.output_root,
-        task_name=config.task.name,
-        experiment_name="train_tensorproduct_koopman",
-        run_name=config.logging.run_name,
-    )
-    _save_run_config(config, run_paths)
-    logger = _create_logger(config, run_paths, "train_tensorproduct_koopman")
-
-    teacher_bundle = load_or_generate_teacher_trajectories(
-        config=config,
-        dataset_bundle=dataset_bundle,
-        teacher_model=teacher_model,
-        device=device,
-        teacher_checkpoint_path=teacher_checkpoint,
-    )
-    model = TensorProductKoopmanFlow(
-        input_dim=dataset_bundle.dim_theta,
-        context_dim=dataset_bundle.dim_x,
-        model_config=config.model.tensorproduct_koopman,
-        device=device,
-    )
-    model.to(device)
-
-    train_loader, val_loader = _make_teacher_loaders(teacher_bundle, config.training.tensorproduct_koopman)
-    trainer = Trainer(model, config.training.tensorproduct_koopman, run_paths, logger)
-    result = trainer.fit(train_loader, val_loader)
-
-    best_model = TensorProductKoopmanFlow.load(str(result.best_checkpoint_path), device=device)
-    evaluation_start_time = time.time()
-    evaluate_model(
-        model=best_model,
-        model_name="tensorproduct_koopman",
-        config=config,
-        dataset_bundle=dataset_bundle,
-        output_dir=run_paths.base_dir / "evaluation",
-        logger=logger,
-    )
-    evaluation_time_seconds = time.time() - evaluation_start_time
-    logger.log_run_summary(
-        {
-            "experiment_name": "train_tensorproduct_koopman",
-            "teacher_data_time_seconds": teacher_bundle.generation_time_seconds,
-            "teacher_data_loaded_from_cache": teacher_bundle.loaded_from_cache,
-            "teacher_num_samples": teacher_bundle.num_samples,
-            "teacher_num_context": teacher_bundle.num_context,
-            "training_time_seconds": result.training_time_seconds,
-            "training_plus_teacher_data_time_seconds": (
-                teacher_bundle.generation_time_seconds + result.training_time_seconds
-            ),
-            "evaluation_time_seconds": evaluation_time_seconds,
-            "total_run_time_seconds": time.time() - run_start_time,
-            "best_checkpoint_path": str(result.best_checkpoint_path),
-        }
-    )
-    logger.close()
-    return ExperimentArtifacts(config=config, run_paths=run_paths, checkpoint_path=result.best_checkpoint_path)
-
-
 def run_train_npe(config_path: str) -> ExperimentArtifacts:
     run_start_time = time.time()
     config = _load_config(config_path)
@@ -447,58 +351,6 @@ def run_train_npe(config_path: str) -> ExperimentArtifacts:
     logger.log_run_summary(
         {
             "experiment_name": "train_npe",
-            "training_time_seconds": result.training_time_seconds,
-            "evaluation_time_seconds": evaluation_time_seconds,
-            "total_run_time_seconds": time.time() - run_start_time,
-            "best_checkpoint_path": str(result.best_checkpoint_path),
-        }
-    )
-    logger.close()
-    return ExperimentArtifacts(config=config, run_paths=run_paths, checkpoint_path=result.best_checkpoint_path)
-
-
-def run_train_nsf(config_path: str) -> ExperimentArtifacts:
-    run_start_time = time.time()
-    config = _load_config(config_path)
-    set_global_seed(config.task.seed)
-    device = detect_device(config.training.nsf.device)
-    dataset_bundle = load_or_generate_dataset(config)
-    run_paths = prepare_run_directories(
-        output_root=config.logging.output_root,
-        task_name=config.task.name,
-        experiment_name="train_nsf",
-        run_name=config.logging.run_name,
-    )
-    _save_run_config(config, run_paths)
-    logger = _create_logger(config, run_paths, "train_nsf")
-
-    model_config = config.model.nsf
-    model_config.transform = "neural_spline"
-    model = NormalizingFlowNPE(
-        input_dim=dataset_bundle.dim_theta,
-        context_dim=dataset_bundle.dim_x,
-        model_config=model_config,
-        device=device,
-    )
-    model.to(device)
-    train_loader, val_loader = _make_pair_loaders(config, dataset_bundle, config.training.nsf)
-    trainer = Trainer(model, config.training.nsf, run_paths, logger)
-    result = trainer.fit(train_loader, val_loader)
-
-    best_model = NormalizingFlowNPE.load(str(result.best_checkpoint_path), device=device)
-    evaluation_start_time = time.time()
-    evaluate_model(
-        model=best_model,
-        model_name="nsf",
-        config=config,
-        dataset_bundle=dataset_bundle,
-        output_dir=run_paths.base_dir / "evaluation",
-        logger=logger,
-    )
-    evaluation_time_seconds = time.time() - evaluation_start_time
-    logger.log_run_summary(
-        {
-            "experiment_name": "train_nsf",
             "training_time_seconds": result.training_time_seconds,
             "evaluation_time_seconds": evaluation_time_seconds,
             "total_run_time_seconds": time.time() - run_start_time,
@@ -755,47 +607,11 @@ def _resolve_koopman_checkpoint(config: ExperimentConfig, config_path: str) -> P
     return run_distill_koopman(config_path).checkpoint_path
 
 
-def _resolve_tensorproduct_koopman_checkpoint(config: ExperimentConfig, config_path: str) -> Path:
-    if (
-        config.evaluation.tensorproduct_koopman_checkpoint_path
-        and Path(config.evaluation.tensorproduct_koopman_checkpoint_path).exists()
-    ):
-        return Path(config.evaluation.tensorproduct_koopman_checkpoint_path)
-    last_model_candidate = (
-        Path(config.logging.output_root)
-        / config.task.name
-        / "last_model"
-        / "train_tensorproduct_koopman"
-        / "best_model.pt"
-    )
-    if last_model_candidate.exists():
-        return last_model_candidate
-    if config.logging.run_name:
-        candidate = (
-            Path(config.logging.output_root)
-            / config.task.name
-            / "train_tensorproduct_koopman"
-            / config.logging.run_name
-            / "checkpoints"
-            / "best_model.pt"
-        )
-        if candidate.exists():
-            return candidate
-    return run_train_tensorproduct_koopman(config_path).checkpoint_path
-
-
 def _resolve_or_train_npe_checkpoint(config: ExperimentConfig, config_path: str) -> Path:
     try:
         return _resolve_npe_checkpoint(config, config_path)
     except FileNotFoundError:
         return run_train_npe(config_path).checkpoint_path
-
-
-def _resolve_or_train_nsf_checkpoint(config: ExperimentConfig, config_path: str) -> Path:
-    try:
-        return _resolve_nsf_checkpoint(config, config_path)
-    except FileNotFoundError:
-        return run_train_nsf(config_path).checkpoint_path
 
 
 def _resolve_or_train_cmpe_checkpoint(config: ExperimentConfig, config_path: str) -> Path:
@@ -805,71 +621,31 @@ def _resolve_or_train_cmpe_checkpoint(config: ExperimentConfig, config_path: str
         return run_train_cmpe(config_path).checkpoint_path
 
 
-def _benchmark_suite_uses_model_type(config: ExperimentConfig, model_type: str) -> bool:
-    return any(variant.model_type == model_type for variant in config.benchmark_suite.variants)
-
-
 def _build_benchmark_suite_specs(
     config: ExperimentConfig,
     device: torch.device,
-    flow_checkpoint: Path | None = None,
-    koopman_checkpoint: Path | None = None,
-    tensorproduct_koopman_checkpoint: Path | None = None,
-    npe_checkpoint: Path | None = None,
-    nsf_checkpoint: Path | None = None,
-    cmpe_checkpoint: Path | None = None,
+    flow_checkpoint: Path,
+    koopman_checkpoint: Path,
+    npe_checkpoint: Path | None,
+    cmpe_checkpoint: Path | None,
 ) -> list[BenchmarkModelSpec]:
-    requested_model_types = {variant.model_type for variant in config.benchmark_suite.variants}
-
-    flow_model = (
-        ConditionalFlowMatching.load(str(flow_checkpoint), device=device)
-        if "flow_matching" in requested_model_types and flow_checkpoint is not None
-        else None
-    )
-    koopman_model = (
-        KoopmanFlow.load(str(koopman_checkpoint), device=device)
-        if "koopman" in requested_model_types and koopman_checkpoint is not None
-        else None
-    )
-    tensorproduct_koopman_model = (
-        TensorProductKoopmanFlow.load(str(tensorproduct_koopman_checkpoint), device=device)
-        if "tensorproduct_koopman" in requested_model_types and tensorproduct_koopman_checkpoint is not None
-        else None
-    )
-    npe_model = (
-        NormalizingFlowNPE.load(str(npe_checkpoint), device=device)
-        if "npe" in requested_model_types and npe_checkpoint is not None
-        else None
-    )
-    nsf_model = (
-        NormalizingFlowNPE.load(str(nsf_checkpoint), device=device)
-        if "nsf" in requested_model_types and nsf_checkpoint is not None
-        else None
-    )
+    flow_model = ConditionalFlowMatching.load(str(flow_checkpoint), device=device)
+    koopman_model = KoopmanFlow.load(str(koopman_checkpoint), device=device)
+    npe_model = NormalizingFlowNPE.load(str(npe_checkpoint), device=device) if npe_checkpoint is not None else None
     cmpe_model = (
-        _load_cmpe_model(cmpe_checkpoint, device=device)
-        if "cmpe" in requested_model_types and cmpe_checkpoint is not None
-        else None
+        _load_cmpe_model(cmpe_checkpoint, device=device) if cmpe_checkpoint is not None else None
     )
 
     timing_lookup = {
         "flow_matching": _read_run_summary_from_checkpoint(flow_checkpoint),
         "koopman": _read_run_summary_from_checkpoint(koopman_checkpoint),
-        "tensorproduct_koopman": (
-            _read_run_summary_from_checkpoint(tensorproduct_koopman_checkpoint)
-            if tensorproduct_koopman_checkpoint is not None
-            else {}
-        ),
         "npe": _read_run_summary_from_checkpoint(npe_checkpoint) if npe_checkpoint is not None else {},
-        "nsf": _read_run_summary_from_checkpoint(nsf_checkpoint) if nsf_checkpoint is not None else {},
         "cmpe": _read_run_summary_from_checkpoint(cmpe_checkpoint) if cmpe_checkpoint is not None else {},
     }
     model_lookup = {
         "flow_matching": flow_model,
         "koopman": koopman_model,
-        "tensorproduct_koopman": tensorproduct_koopman_model,
         "npe": npe_model,
-        "nsf": nsf_model,
         "cmpe": cmpe_model,
     }
 
@@ -877,10 +653,7 @@ def _build_benchmark_suite_specs(
     for variant in config.benchmark_suite.variants:
         model = model_lookup.get(variant.model_type)
         if model is None:
-            raise ValueError(
-                f"Benchmark variant '{variant.name}' requested model_type "
-                f"'{variant.model_type}', but no checkpoint/model was resolved for it."
-            )
+            continue
         benchmark_specs.append(
             BenchmarkModelSpec(
                 label=variant.name,
@@ -892,25 +665,71 @@ def _build_benchmark_suite_specs(
     return benchmark_specs
 
 
+def run_benchmark_compare(config_path: str) -> ExperimentArtifacts:
+    config = _load_config(config_path)
+    set_global_seed(config.task.seed)
+    device = detect_device(config.training.flow_matching.device)
+    dataset_bundle = load_or_generate_dataset(config)
+    flow_checkpoint = (
+        Path(config.evaluation.flow_checkpoint_path)
+        if config.evaluation.flow_checkpoint_path and Path(config.evaluation.flow_checkpoint_path).exists()
+        else _resolve_teacher_checkpoint(config, config_path)
+    )
+    koopman_checkpoint = _resolve_koopman_checkpoint(config, config_path)
+
+    run_paths = prepare_run_directories(
+        output_root=config.logging.output_root,
+        task_name=config.task.name,
+        experiment_name="benchmark_compare",
+        run_name=config.logging.run_name,
+    )
+    _save_run_config(config, run_paths)
+    logger = _create_logger(config, run_paths, "benchmark_compare")
+
+    benchmark_specs = [
+        BenchmarkModelSpec(
+            label="flow_matching",
+            model=ConditionalFlowMatching.load(str(flow_checkpoint), device=device),
+            timing_metadata=_read_run_summary_from_checkpoint(flow_checkpoint),
+        ),
+        BenchmarkModelSpec(
+            label="koopman",
+            model=KoopmanFlow.load(str(koopman_checkpoint), device=device),
+            timing_metadata=_read_run_summary_from_checkpoint(koopman_checkpoint),
+        ),
+    ]
+    if config.evaluation.include_npe or config.evaluation.npe_checkpoint_path:
+        try:
+            npe_checkpoint = _resolve_npe_checkpoint(config, config_path)
+        except FileNotFoundError:
+            npe_checkpoint = None
+        if npe_checkpoint is not None:
+            benchmark_specs.append(
+                BenchmarkModelSpec(
+                    label="npe",
+                    model=NormalizingFlowNPE.load(str(npe_checkpoint), device=device),
+                    timing_metadata=_read_run_summary_from_checkpoint(npe_checkpoint),
+                )
+            )
+    benchmark_models(
+        models=benchmark_specs,
+        config=config,
+        dataset_bundle=dataset_bundle,
+        output_dir=run_paths.base_dir / "benchmark",
+        timing_metadata={spec.label: spec.timing_metadata for spec in benchmark_specs},
+        logger=logger,
+    )
+    logger.close()
+    return ExperimentArtifacts(config=config, run_paths=run_paths, checkpoint_path=koopman_checkpoint)
+
+
 def run_benchmark_suite(
     config_path: str,
     *,
     plots_only: bool = False,
     force_retrain: bool = False,
-    train_flow_matching: bool | None = None,
-    generate_teacher: bool | None = None,
 ) -> ExperimentArtifacts:
     config = _load_config(config_path)
-    if train_flow_matching is not None or generate_teacher is not None:
-        if train_flow_matching is not None:
-            config.benchmark_suite.train_flow_matching = bool(train_flow_matching)
-        if generate_teacher is not None:
-            config.teacher.generate_trajectories = bool(generate_teacher)
-        override_dir = Path(config.logging.output_root) / config.task.name / "benchmark_suite_overrides"
-        override_dir.mkdir(parents=True, exist_ok=True)
-        override_path = override_dir / f"resolved_{int(time.time())}.yaml"
-        save_resolved_config(config, str(override_path))
-        config_path = str(override_path)
     if plots_only:
         run_dir = resolve_existing_run_dir(
             output_root=config.logging.output_root,
@@ -933,73 +752,16 @@ def run_benchmark_suite(
     set_global_seed(config.task.seed)
     device = detect_device(config.training.flow_matching.device)
     dataset_bundle = load_or_generate_dataset(config)
-    train_requested_models = bool(force_retrain or config.benchmark_suite.train_models)
-    flow_is_needed = (
-        _benchmark_suite_uses_model_type(config, "flow_matching")
-        or _benchmark_suite_uses_model_type(config, "koopman")
-        or _benchmark_suite_uses_model_type(config, "tensorproduct_koopman")
-    )
-    if flow_is_needed:
-        flow_checkpoint = (
-            run_train_flow(config_path).checkpoint_path
-            if config.benchmark_suite.train_flow_matching
-            else _resolve_teacher_checkpoint(config, config_path)
-        )
+    if force_retrain:
+        flow_checkpoint = run_train_flow(config_path).checkpoint_path
+        koopman_checkpoint = run_distill_koopman(config_path).checkpoint_path
+        npe_checkpoint = run_train_npe(config_path).checkpoint_path
+        cmpe_checkpoint = run_train_cmpe(config_path).checkpoint_path
     else:
-        flow_checkpoint = None
-
-    if train_requested_models:
-        koopman_checkpoint = (
-            run_distill_koopman(config_path).checkpoint_path
-            if _benchmark_suite_uses_model_type(config, "koopman")
-            else None
-        )
-        tensorproduct_koopman_checkpoint = (
-            run_train_tensorproduct_koopman(config_path).checkpoint_path
-            if _benchmark_suite_uses_model_type(config, "tensorproduct_koopman")
-            else None
-        )
-        npe_checkpoint = (
-            run_train_npe(config_path).checkpoint_path
-            if _benchmark_suite_uses_model_type(config, "npe")
-            else None
-        )
-        nsf_checkpoint = (
-            run_train_nsf(config_path).checkpoint_path
-            if _benchmark_suite_uses_model_type(config, "nsf")
-            else None
-        )
-        cmpe_checkpoint = (
-            run_train_cmpe(config_path).checkpoint_path
-            if _benchmark_suite_uses_model_type(config, "cmpe")
-            else None
-        )
-    else:
-        koopman_checkpoint = (
-            _resolve_koopman_checkpoint(config, config_path)
-            if _benchmark_suite_uses_model_type(config, "koopman")
-            else None
-        )
-        tensorproduct_koopman_checkpoint = (
-            _resolve_tensorproduct_koopman_checkpoint(config, config_path)
-            if _benchmark_suite_uses_model_type(config, "tensorproduct_koopman")
-            else None
-        )
-        npe_checkpoint = (
-            _resolve_or_train_npe_checkpoint(config, config_path)
-            if _benchmark_suite_uses_model_type(config, "npe")
-            else None
-        )
-        nsf_checkpoint = (
-            _resolve_or_train_nsf_checkpoint(config, config_path)
-            if _benchmark_suite_uses_model_type(config, "nsf")
-            else None
-        )
-        cmpe_checkpoint = (
-            _resolve_or_train_cmpe_checkpoint(config, config_path)
-            if _benchmark_suite_uses_model_type(config, "cmpe")
-            else None
-        )
+        flow_checkpoint = _resolve_teacher_checkpoint(config, config_path)
+        koopman_checkpoint = _resolve_koopman_checkpoint(config, config_path)
+        npe_checkpoint = _resolve_or_train_npe_checkpoint(config, config_path)
+        cmpe_checkpoint = _resolve_or_train_cmpe_checkpoint(config, config_path)
 
     run_paths = prepare_run_directories(
         output_root=config.logging.output_root,
@@ -1014,13 +776,9 @@ def run_benchmark_suite(
         device=device,
         flow_checkpoint=flow_checkpoint,
         koopman_checkpoint=koopman_checkpoint,
-        tensorproduct_koopman_checkpoint=tensorproduct_koopman_checkpoint,
         npe_checkpoint=npe_checkpoint,
-        nsf_checkpoint=nsf_checkpoint,
         cmpe_checkpoint=cmpe_checkpoint,
     )
-    if not benchmark_specs:
-        raise ValueError("benchmark_suite.variants did not resolve to any runnable model specs.")
     benchmark_models(
         models=benchmark_specs,
         config=config,
@@ -1030,23 +788,16 @@ def run_benchmark_suite(
         logger=logger,
     )
     logger.close()
-    checkpoint_path = next(
-        checkpoint
-        for checkpoint in [
-            flow_checkpoint,
-            koopman_checkpoint,
-            tensorproduct_koopman_checkpoint,
-            npe_checkpoint,
-            nsf_checkpoint,
-            cmpe_checkpoint,
-        ]
-        if checkpoint is not None
-    )
-    return ExperimentArtifacts(config=config, run_paths=run_paths, checkpoint_path=checkpoint_path)
+    return ExperimentArtifacts(config=config, run_paths=run_paths, checkpoint_path=flow_checkpoint)
 
 
 def run_evaluate(config_path: str) -> ExperimentArtifacts:
     config = _load_config(config_path)
+    if (
+        config.evaluation.flow_checkpoint_path and config.evaluation.koopman_checkpoint_path
+    ) or config.evaluation.include_npe:
+        return run_benchmark_compare(config_path)
+
     device = detect_device(config.training.flow_matching.device)
     dataset_bundle = load_or_generate_dataset(config)
     run_paths = prepare_run_directories(
@@ -1080,34 +831,12 @@ def run_evaluate(config_path: str) -> ExperimentArtifacts:
             run_paths.base_dir / "evaluation",
             logger=logger,
         )
-    elif config.evaluation.tensorproduct_koopman_checkpoint_path:
-        model = TensorProductKoopmanFlow.load(config.evaluation.tensorproduct_koopman_checkpoint_path, device=device)
-        checkpoint_path = Path(config.evaluation.tensorproduct_koopman_checkpoint_path)
-        evaluate_model(
-            model,
-            "tensorproduct_koopman",
-            config,
-            dataset_bundle,
-            run_paths.base_dir / "evaluation",
-            logger=logger,
-        )
     elif config.evaluation.npe_checkpoint_path:
         model = NormalizingFlowNPE.load(config.evaluation.npe_checkpoint_path, device=device)
         checkpoint_path = Path(config.evaluation.npe_checkpoint_path)
         evaluate_model(
             model,
             "npe",
-            config,
-            dataset_bundle,
-            run_paths.base_dir / "evaluation",
-            logger=logger,
-        )
-    elif config.evaluation.nsf_checkpoint_path:
-        model = NormalizingFlowNPE.load(config.evaluation.nsf_checkpoint_path, device=device)
-        checkpoint_path = Path(config.evaluation.nsf_checkpoint_path)
-        evaluate_model(
-            model,
-            "nsf",
             config,
             dataset_bundle,
             run_paths.base_dir / "evaluation",
@@ -1128,10 +857,8 @@ def run_evaluate(config_path: str) -> ExperimentArtifacts:
     else:
         raise FileNotFoundError(
             "Provide at least one checkpoint path in evaluation.flow_checkpoint_path, "
-            "evaluation.koopman_checkpoint_path, "
-            "evaluation.tensorproduct_koopman_checkpoint_path, "
-            "evaluation.npe_checkpoint_path, "
-            "evaluation.nsf_checkpoint_path, or evaluation.cmpe_checkpoint_path."
+            "evaluation.koopman_checkpoint_path, evaluation.npe_checkpoint_path, "
+            "or evaluation.cmpe_checkpoint_path."
         )
 
     logger.close()

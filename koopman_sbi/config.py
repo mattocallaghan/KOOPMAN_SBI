@@ -31,7 +31,7 @@ class FlowMatchingModelConfig:
 @dataclass
 class CMPEModelConfig:
     network: NetworkConfig
-    backend: str = "bayesflow"
+    backend: str = "native"
     eps: float = 1e-3
     t_max: float = 80.0
     rho: float = 7.0
@@ -202,6 +202,7 @@ class TaskConfig:
 class TeacherConfig:
     checkpoint_path: Optional[str] = None
     auto_train_if_missing: bool = True
+    generate_trajectories: bool = True
     num_samples: int = 100000
     num_context: int = 10000
     batch_size: int = 1000
@@ -281,11 +282,14 @@ def _default_benchmark_variants() -> List["BenchmarkVariantConfig"]:
         BenchmarkVariantConfig(name="cmpe_10", model_type="cmpe", sample_kwargs={"num_steps": 10}),
         BenchmarkVariantConfig(name="cmpe_100", model_type="cmpe", sample_kwargs={"num_steps": 100}),
         BenchmarkVariantConfig(name="koopman", model_type="koopman"),
+        BenchmarkVariantConfig(name="tensorproduct_koopman", model_type="tensorproduct_koopman"),
     ]
 
 
 @dataclass
 class BenchmarkSuiteConfig:
+    train_flow_matching: bool = True
+    train_models: bool = True
     variants: List[BenchmarkVariantConfig] = field(default_factory=_default_benchmark_variants)
 
 
