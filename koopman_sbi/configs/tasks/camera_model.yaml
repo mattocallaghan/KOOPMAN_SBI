@@ -4,7 +4,9 @@
 
 task:
   name: camera_model
-  dataset_dir: logs/camera_model/shared/dataset
+  # 300k simulations (was 100k in logs/camera_model/shared/dataset): the student was limited by generalization.
+  num_train_samples: 300000
+  dataset_dir: logs/camera_model/shared/dataset_300k
 model:
   flow_matching:
     network:
@@ -34,11 +36,16 @@ model:
     pullback_metric_epsilon: 0.05
 teacher:
   batch_size: 1024
-  num_samples: 100000
-  num_context: 50000
+  # 300k pairs over 150k observations (was 100k over 50k, kept in teacher_trajectories).
+  num_samples: 300000
+  num_context: 150000
+  trajectory_dir: logs/camera_model/shared/teacher_trajectories_300k
 training:
   flow_matching:
     epochs: 10
+  tensorproduct_koopman:
+    # 250 epochs plateaued by ~150 (the plateau scheduler had decayed the learning rate to ~1e-8).
+    epochs: 150
 evaluation:
   num_posterior_samples: 1000
   observations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
