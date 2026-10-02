@@ -1,0 +1,3 @@
+task:
+  name: sir
+  dataset_dir: logs/sir/shared/dataset_v2

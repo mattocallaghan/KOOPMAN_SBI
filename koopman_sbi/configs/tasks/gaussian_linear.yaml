@@ -1,0 +1,3 @@
+task:
+  name: gaussian_linear
+  dataset_dir: logs/gaussian_linear/shared/dataset_v2

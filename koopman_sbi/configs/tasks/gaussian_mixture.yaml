@@ -1,0 +1,9 @@
+# Experimental: overrides the global defaults for the tensor-product Koopman study.
+# See GAUSSIAN_MIXTURE_TENSORPRODUCT_KOOPMAN.md for what was tried on this task.
+
+task:
+  name: gaussian_mixture
+  dataset_dir: logs/gaussian_mixture/shared/dataset_v2
+model:
+  tensorproduct_koopman:
+    use_time_dependent_consistency: false

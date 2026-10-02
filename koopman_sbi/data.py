@@ -6,9 +6,24 @@ from pathlib import Path
 from typing import Tuple
 
 import numpy as np
-import sbibm
+from koopman_sbi.tasks import get_task
 import torch
 from torch.utils.data import Dataset
+
+# SBIBM's SLCP task loads a trusted, package-bundled Pyro distribution with
+# torch.load(). PyTorch 2.6+ defaults to weights_only=True, so allowlist the
+# distribution class required by that file before the simulator is invoked.
+try:
+    from pyro.distributions.torch import Categorical, Chi2, Independent, MixtureSameFamily
+    from pyro.distributions.multivariate_studentt import MultivariateStudentT
+
+    torch.serialization.add_safe_globals(
+        [Categorical, Chi2, Independent, MixtureSameFamily, MultivariateStudentT]
+    )
+except (ImportError, AttributeError):
+    # Older PyTorch/Pyro combinations do not expose this API and do not need
+    # the compatibility registration.
+    pass
 
 from koopman_sbi.config import ExperimentConfig
 from koopman_sbi.paths import resolve_dataset_dir
@@ -26,12 +41,25 @@ class Standardizer:
     x_std: torch.Tensor
 
     @classmethod
-    def from_training_tensors(cls, theta: torch.Tensor, x: torch.Tensor) -> "Standardizer":
+    def from_training_tensors(cls, theta: torch.Tensor, x: torch.Tensor, per_dimension: bool = True) -> "Standardizer":
+        """Per-dimension mean/std, or (per_dimension=False, for images) one mean/std over all entries.
+
+        Per-pixel scaling blows up rarely-active border pixels of images (tiny std), so image tasks use a
+        single global scale that keeps pixel intensities comparable.
+        """
+        if per_dimension:
+            return cls(
+                theta_mean=torch.mean(theta, dim=0),
+                theta_std=_safe_std(theta),
+                x_mean=torch.mean(x, dim=0),
+                x_std=_safe_std(x),
+            )
+        expand = lambda value, like: value.expand(like.shape[1]).clone()
         return cls(
-            theta_mean=torch.mean(theta, dim=0),
-            theta_std=_safe_std(theta),
-            x_mean=torch.mean(x, dim=0),
-            x_std=_safe_std(x),
+            theta_mean=expand(theta.mean(), theta),
+            theta_std=expand(theta.std().clamp_min(1e-6), theta),
+            x_mean=expand(x.mean(), x),
+            x_std=expand(x.std().clamp_min(1e-6), x),
         )
 
     def standardize_theta(self, theta: torch.Tensor) -> torch.Tensor:
@@ -85,7 +113,7 @@ class DatasetBundle:
 
 
 def _simulate_dataset(config: ExperimentConfig) -> Tuple[torch.Tensor, torch.Tensor]:
-    task = sbibm.get_task(config.task.name)
+    task = get_task(config.task.name)
     prior = task.get_prior()
     simulator = task.get_simulator()
     num_samples = config.task.num_train_samples
@@ -138,7 +166,8 @@ def load_or_generate_dataset(config: ExperimentConfig) -> DatasetBundle:
     theta_val = raw_theta[val_indices]
     x_val = raw_x[val_indices]
 
-    standardizer = Standardizer.from_training_tensors(theta_train, x_train)
+    per_dimension = getattr(get_task(config.task.name), "standardization", "per_dimension") == "per_dimension"
+    standardizer = Standardizer.from_training_tensors(theta_train, x_train, per_dimension=per_dimension)
     train_dataset = SBIPairDataset(theta_train, x_train, standardizer)
     val_dataset = SBIPairDataset(theta_val, x_val, standardizer)
     return DatasetBundle(

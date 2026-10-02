@@ -15,6 +15,7 @@ else:
 
 from koopman_sbi.config import FlowMatchingModelConfig, NetworkConfig
 from koopman_sbi.models.base import BasePosteriorModel
+from koopman_sbi.models.image_networks import ConditionalConvUNet
 from koopman_sbi.models.networks import DenseResidualNet
 from koopman_sbi.runtime import move_tensor_to_device
 
@@ -33,19 +34,24 @@ class ConditionalFlowMatching(BasePosteriorModel):
         self.model_config = model_config
         self.device = device
         network_cfg = model_config.network
-        self.vector_field = DenseResidualNet(
-            input_dim=input_dim + context_dim + 1,
-            output_dim=input_dim,
-            hidden_dims=network_cfg.hidden_dims,
-            activation=network_cfg.activation,
-            batch_norm=network_cfg.batch_norm,
-            dropout=network_cfg.dropout,
-            theta_dim=input_dim,
-            context_dim=context_dim,
-            time_dim=1,
-            theta_with_glu=network_cfg.theta_with_glu,
-            context_with_glu=network_cfg.context_with_glu,
-        )
+        if network_cfg.type == "ConvUNet":
+            self.vector_field = ConditionalConvUNet(input_dim, context_dim, network_cfg.hidden_dims)
+        elif network_cfg.type == "DenseResidualNet":
+            self.vector_field = DenseResidualNet(
+                input_dim=input_dim + context_dim + 1,
+                output_dim=input_dim,
+                hidden_dims=network_cfg.hidden_dims,
+                activation=network_cfg.activation,
+                batch_norm=network_cfg.batch_norm,
+                dropout=network_cfg.dropout,
+                theta_dim=input_dim,
+                context_dim=context_dim,
+                time_dim=1,
+                theta_with_glu=network_cfg.theta_with_glu,
+                context_with_glu=network_cfg.context_with_glu,
+            )
+        else:
+            raise ValueError(f"Unsupported flow_matching.network.type: {network_cfg.type!r}")
 
     def sample_time(self, batch_size: int) -> torch.Tensor:
         exponent = self.model_config.time_prior_exponent
@@ -135,6 +141,87 @@ class ConditionalFlowMatching(BasePosteriorModel):
                 options=ode_options,
             )
             return trajectory[-1]
+
+    def sample_trajectory(
+        self,
+        context: torch.Tensor,
+        initial_noise: Optional[torch.Tensor] = None,
+        max_trajectory_steps: Optional[int] = None,
+        solver: Optional[str] = None,
+        atol: Optional[float] = None,
+        rtol: Optional[float] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if odeint is None:
+            raise ImportError(
+                "ConditionalFlowMatching trajectory sampling requires the `torchdiffeq` package. "
+                "Install it in the active environment instead of using the removed fallback integrator."
+            ) from _TORCHDIFFEQ_IMPORT_ERROR
+        self.eval()
+        with torch.no_grad():
+            context = move_tensor_to_device(context, self.device)
+            batch_size = context.shape[0]
+            theta_0 = initial_noise if initial_noise is not None else self.sample_base_noise(batch_size)
+            theta_0 = move_tensor_to_device(theta_0, self.device)
+            dtype = torch.float32 if self.device.type == "mps" else torch.float64
+            final_time = 1.0 - self.model_config.sigma_min
+            t_span = torch.tensor([0.0, final_time], dtype=dtype, device=self.device)
+            method = solver or "dopri5"
+            ode_options = {"dtype": torch.float32} if self.device.type == "mps" else {}
+            accepted_times = []
+            accepted_states = []
+
+            class _RecordedVectorField(nn.Module):
+                def __init__(self, outer: "ConditionalFlowMatching") -> None:
+                    super().__init__()
+                    self.outer = outer
+
+                def forward(self, current_t: torch.Tensor, theta_t: torch.Tensor) -> torch.Tensor:
+                    return self.outer.forward(current_t, theta_t, context)
+
+                def callback_accept_step(
+                    self,
+                    current_t: torch.Tensor,
+                    theta_t: torch.Tensor,
+                    dt: torch.Tensor,
+                ) -> None:
+                    del dt
+                    accepted_times.append(current_t.detach().float().cpu())
+                    accepted_states.append(theta_t.detach().float().cpu())
+
+            trajectory = odeint(
+                _RecordedVectorField(self),
+                theta_0,
+                t_span,
+                atol=self.model_config.atol if atol is None else atol,
+                rtol=self.model_config.rtol if rtol is None else rtol,
+                method=method,
+                options=ode_options,
+            )
+            accepted_times.append(t_span[-1].detach().float().cpu())
+            accepted_states.append(trajectory[-1].detach().float().cpu())
+            time_values = torch.stack(accepted_times)
+            path_values = torch.stack(accepted_states, dim=1)
+            if max_trajectory_steps is not None and int(max_trajectory_steps) < 2:
+                raise ValueError("max_trajectory_steps must be at least 2 when provided.")
+            max_steps = int(max_trajectory_steps or len(time_values))
+            if len(time_values) > max_steps:
+                keep_indices = torch.linspace(0, len(time_values) - 1, steps=max_steps).round().long()
+                keep_indices[-1] = len(time_values) - 1
+                keep_indices = torch.unique_consecutive(keep_indices)
+                time_values = time_values[keep_indices]
+                path_values = path_values[:, keep_indices]
+            num_steps = len(time_values)
+            padded_time = torch.zeros(batch_size, max_steps, dtype=torch.float32)
+            padded_path = torch.zeros(batch_size, max_steps, self.input_dim, dtype=torch.float32)
+            path_mask = torch.zeros(batch_size, max_steps, dtype=torch.bool)
+            padded_time[:, :num_steps] = time_values.unsqueeze(0).expand(batch_size, -1)
+            padded_path[:, :num_steps] = path_values
+            path_mask[:, :num_steps] = True
+            return (
+                padded_time.to(self.device),
+                padded_path.to(self.device),
+                path_mask.to(self.device),
+            )
 
     def save(self, filepath: str) -> None:
         torch.save(

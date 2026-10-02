@@ -1,0 +1,3 @@
+task:
+  name: lotka_volterra
+  dataset_dir: logs/lotka_volterra/shared/dataset_v2

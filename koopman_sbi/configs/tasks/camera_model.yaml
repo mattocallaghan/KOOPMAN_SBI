@@ -1,0 +1,57 @@
+# Noisy blurred camera (GATSBI camera-model experiment): theta = 28x28 EMNIST image, x = Poisson noise + blur.
+# Implicit prior (the EMNIST dataset, downloaded to logs/shared/emnist on first use), no reference posterior:
+# evaluation compares the student with the teacher flow (C2ST) and posterior point estimates with the true image.
+
+task:
+  name: camera_model
+  dataset_dir: logs/camera_model/shared/dataset
+model:
+  flow_matching:
+    network:
+      type: ConvUNet
+      hidden_dims: [32, 64, 128]
+  tensorproduct_koopman:
+    state_network:
+      type: ConvEncoder
+      hidden_dims: [32, 64, 128]
+    context_network:
+      type: ConvEncoder
+      hidden_dims: [32, 64, 128]
+    decoder_network:
+      type: ConvDecoder
+      hidden_dims: [128, 64, 32]
+    # The full flow Jacobian is 784 x 784 per teacher pair (~245 GB for 100k pairs); use a Hutchinson estimate:
+    # "trace" = one isotropic weight per pair from log|det J|; "diagonal" = per-pixel posterior spread.
+    pullback_endpoint_metric: true
+    # vjp_sketch: unbiased estimate of the full anisotropic pull-back metric (adjoint probes per pair, its own
+    # pass at vjp_sketch_tolerance 1e-3; ~35 s per 256 pairs on MPS). Targets the student's under-dispersion in
+    # low-variance (fine-detail) directions. Cheaper but isotropic alternative: finite_difference_trace.
+    jacobian_type: vjp_sketch
+    # One probe: unbiased, noisy per pair (corr ~0.5) but ~4% error averaged over a 512-pair batch; ~3x faster.
+    hutchinson_probes: 1
+    vjp_sketch_tolerance: 0.001
+    # Floor on the local width for the trace/diagonal types (not used by vjp_sketch, which inverts nothing).
+    pullback_metric_epsilon: 0.05
+teacher:
+  batch_size: 1024
+  num_samples: 100000
+  num_context: 50000
+training:
+  flow_matching:
+    epochs: 10
+evaluation:
+  num_posterior_samples: 1000
+  observations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  metrics: [c2st_vs_teacher, posterior_mean_mse, posterior_mean_psnr, posterior_mean_ssim, sample_mse, posterior_std, coverage_90]
+benchmark_suite:
+  train_flow_matching: true
+  variants:
+  - name: fmnpe_dopri5
+    model_type: flow_matching
+    sample_kwargs:
+      atol: 1.0e-05
+      rtol: 1.0e-05
+      solver: dopri5
+  - name: tensorproduct_koopman
+    model_type: tensorproduct_koopman
+    sample_kwargs: {}

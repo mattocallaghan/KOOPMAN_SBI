@@ -26,7 +26,7 @@ model:
     rtol: 1.0e-05
   koopman:
     network:
-      hidden_dims: [88, 360, 1432, 360, 88]
+      hidden_dims: [128, 224, 320, 224, 128]
       activation: gelu
       batch_norm: false
       dropout: 0.0
@@ -38,7 +38,7 @@ model:
     lambda_lat: 1.0
     lambda_pred: 1.0
     adversarial:
-      enabled: false
+      enabled: true
       lambda_adv: 0.1
       hidden_dims: [256, 256]
       activation: gelu
@@ -71,20 +71,22 @@ model:
       type: DenseResidualNet
     latent_dim: 256
     context_feature_dim: 128
-    tensor_rank: 128
+    tensor_rank: 64
     # one-shot
-    lambda_ae: 10.0
-    lambda_lat: 10.0
-    lambda_end: 10.0
+    lambda_ae: 0.2
+    lambda_lat: 0.608
+    lambda_end: 1.0
     pullback_endpoint_metric: true
-    pullback_metric_weight: 10.0
-    pullback_metric_epsilon: 0.00
-    jacobian_type: full
-    hutchinson_probes: 4
-    vjp_sketch_tolerance: 0.001
+    pullback_metric_weight: 1.0
+    pullback_metric_epsilon: 0.05
     # continuous time
     use_time_dependent_consistency: false
+    lambda_phase: 0.608
+    lambda_target: 1.0
+    lambda_recon: 0.2
     lambda_cons: 1.0
+    # Continuous mode: cap on the tensor-product generator's spectral norm (<= 0 disables).
+    continuous_eigenvalue_bound: 5.0
     continuous_final_time: 1.0
 
     adversarial:
@@ -155,7 +157,7 @@ teacher:
   generate_trajectories: true
   num_samples: 100000
   num_context: 50000
-  batch_size: 128
+  batch_size: 256
   store_full_trajectory: false
   trajectory_steps: 16
   cache_trajectories: true
@@ -202,11 +204,11 @@ training:
       gamma: 0.5
   tensorproduct_koopman:
     batch_size: 512
-    epochs: 100
+    epochs: 300
     fit_verbose: 2
     num_workers: 0
     device: auto
-    gradient_clip_norm: 1.0
+    gradient_clip_norm: null
     precision: float32
     use_tensorboard: true
     optimizer:

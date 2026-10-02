@@ -12,7 +12,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import sbibm
+from koopman_sbi.tasks import get_task
 import torch
 
 from koopman_sbi.config import ExperimentConfig, resolve_task_config_path, save_resolved_config
@@ -132,7 +132,7 @@ def _build_standardized_observation_bank(
     config: ExperimentConfig,
     dataset_bundle: DatasetBundle,
 ) -> torch.Tensor:
-    task = sbibm.get_task(config.task.name)
+    task = get_task(config.task.name)
     observations = []
     for obs in config.evaluation.observations:
         observation = task.get_observation(num_observation=obs).float()

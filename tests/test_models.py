@@ -204,3 +204,77 @@ def test_cmpe_shapes_and_round_trip(tmp_path):
     restored = ConsistencyModelPosteriorEstimator.load(str(checkpoint_path), device=torch.device("cpu"))
     restored_samples = restored.sample_batch(torch.randn(4, 2), num_steps=10)
     assert restored_samples.shape == (4, 2)
+
+
+def test_tensorproduct_endpoint_loss_metric_shapes_reduce_to_mse():
+    from koopman_sbi.models.tensorproduct_koopman import TensorProductKoopmanFlow
+
+    predicted, target = torch.randn(16, 3), torch.randn(16, 3)
+    mse = torch.nn.functional.mse_loss(predicted, target)
+    loss = TensorProductKoopmanFlow._endpoint_loss
+    for unit_metric in [torch.eye(3).expand(16, 3, 3), torch.ones(16, 3), torch.ones(16)]:  # full, diagonal, trace
+        assert torch.allclose(loss(predicted, target, unit_metric), mse)
+    assert torch.allclose(loss(predicted, target, 2 * torch.ones(16)), 2 * mse)
+
+
+def test_trace_estimators_match_exact_log_determinant_for_linear_flow():
+    """For v = A theta the flow map is exp(T A), so log|det J| = T tr(A); both Hutchinson estimators are unbiased."""
+    import types
+
+    from koopman_sbi.teacher import _teacher_flow_sensitivity
+
+    torch.manual_seed(0)
+    dim = 3
+    matrix = 0.3 * torch.randn(dim, dim)
+
+    class LinearField:
+        model_config = types.SimpleNamespace(sigma_min=0.0, atol=1e-7, rtol=1e-7)
+
+        def eval(self):
+            return self
+
+        def forward(self, time, theta, context):
+            return theta @ matrix.T
+
+    noise, context = torch.randn(4000, dim), torch.zeros(4000, 1)
+    exact = torch.trace(matrix)
+    for kind in ["trace", "finite_difference_trace"]:
+        estimate = _teacher_flow_sensitivity(LinearField(), noise, context, torch.device("cpu"), kind, 1, seed=0)
+        assert abs(float(estimate.mean()) - float(exact)) < 0.05
+
+
+def test_vjp_sketch_matches_exact_inverse_transpose_jacobian_and_batches():
+    """For v = A theta, J = exp(T A); the adjoint probes must equal J^-T r, and the sketch metric must batch."""
+    import types
+
+    from torch.utils.data import DataLoader
+
+    from koopman_sbi.models.tensorproduct_koopman import TensorProductKoopmanFlow
+    from koopman_sbi.teacher import TeacherTrajectoryDataset, _teacher_flow_sensitivity
+
+    torch.manual_seed(0)
+    dim, probes = 3, 5
+    matrix = 0.4 * torch.randn(dim, dim, dtype=torch.float64)
+
+    class LinearField:
+        model_config = types.SimpleNamespace(sigma_min=0.0, atol=1e-8, rtol=1e-8)
+
+        def eval(self):
+            return self
+
+        def forward(self, time, theta, context):
+            return theta @ matrix.T
+
+    noise, context = torch.randn(8, dim, dtype=torch.float64), torch.zeros(8, 1, dtype=torch.float64)
+    sketch = _teacher_flow_sensitivity(LinearField(), noise, context, torch.device("cpu"), "vjp_sketch", probes,
+                                       seed=0, tolerance=1e-8)
+    generator = torch.Generator().manual_seed(0)
+    initial = torch.randn(8, dim, probes, generator=generator).double()
+    inverse_transpose = torch.linalg.inv(torch.linalg.matrix_exp(matrix)).T
+    assert torch.allclose(sketch, torch.einsum("ij,bjk->bik", inverse_transpose, initial), atol=1e-5)
+
+    dataset = TeacherTrajectoryDataset(noise.float(), noise.float(), context.float())
+    dataset.endpoint_metric = {"low_rank_factors": sketch.float()}
+    batch = next(iter(DataLoader(dataset, batch_size=4)))
+    loss = TensorProductKoopmanFlow._endpoint_loss(batch[1] + 1.0, batch[1], batch[3])
+    assert torch.isfinite(loss) and loss > 1.0  # MSE of 1 plus a positive low-rank term

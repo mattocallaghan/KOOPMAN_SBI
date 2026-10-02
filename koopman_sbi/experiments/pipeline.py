@@ -24,7 +24,11 @@ from koopman_sbi.models import (
 )
 from koopman_sbi.paths import RunPaths, prepare_run_directories, resolve_existing_run_dir
 from koopman_sbi.runtime import detect_device, set_global_seed
-from koopman_sbi.teacher import TeacherTrajectoryBundle, load_or_generate_teacher_trajectories
+from koopman_sbi.teacher import (
+    TeacherTrajectoryBundle,
+    attach_pullback_endpoint_metric,
+    load_or_generate_teacher_trajectories,
+)
 from koopman_sbi.training import Trainer
 
 
@@ -363,6 +367,10 @@ def run_train_tensorproduct_koopman(config_path: str) -> ExperimentArtifacts:
         teacher_model=teacher_model,
         device=device,
         teacher_checkpoint_path=teacher_checkpoint,
+        # The pull-back metric's flow sensitivity is computed in the same solve as the trajectories.
+        sensitivity=(
+            (config.model.tensorproduct_koopman.jacobian_type, config.model.tensorproduct_koopman.hutchinson_probes) if config.model.tensorproduct_koopman.pullback_endpoint_metric else None
+        ),
     )
     model = TensorProductKoopmanFlow(
         input_dim=dataset_bundle.dim_theta,
@@ -370,7 +378,27 @@ def run_train_tensorproduct_koopman(config_path: str) -> ExperimentArtifacts:
         model_config=config.model.tensorproduct_koopman,
         device=device,
     )
+    if config.model.tensorproduct_koopman.use_time_dependent_consistency:
+        model.set_teacher_model(teacher_model)
     model.to(device)
+
+    endpoint_metric_time_seconds = 0.0
+    if config.model.tensorproduct_koopman.pullback_endpoint_metric:
+        if teacher_bundle.train_dataset.include_full_trajectory:
+            print("[tensorproduct_koopman] pullback_endpoint_metric is not supported with full-trajectory batches; skipped.")
+        else:
+            endpoint_metric_time_seconds = attach_pullback_endpoint_metric(
+                teacher_bundle,
+                teacher_model,
+                device,
+                weight=config.model.tensorproduct_koopman.pullback_metric_weight,
+                epsilon_fraction=config.model.tensorproduct_koopman.pullback_metric_epsilon,
+                jacobian_type=config.model.tensorproduct_koopman.jacobian_type,
+                probes=config.model.tensorproduct_koopman.hutchinson_probes,
+                sketch_tolerance=config.model.tensorproduct_koopman.vjp_sketch_tolerance,
+                # A separate pass (fallback or vjp_sketch) uses the same batch size as trajectory generation.
+                chunk_size=config.teacher.batch_size,
+            )
 
     train_loader, val_loader = _make_teacher_loaders(teacher_bundle, config.training.tensorproduct_koopman)
     trainer = Trainer(model, config.training.tensorproduct_koopman, run_paths, logger)
@@ -394,9 +422,10 @@ def run_train_tensorproduct_koopman(config_path: str) -> ExperimentArtifacts:
             "teacher_data_loaded_from_cache": teacher_bundle.loaded_from_cache,
             "teacher_num_samples": teacher_bundle.num_samples,
             "teacher_num_context": teacher_bundle.num_context,
+            "endpoint_metric_time_seconds": endpoint_metric_time_seconds,
             "training_time_seconds": result.training_time_seconds,
             "training_plus_teacher_data_time_seconds": (
-                teacher_bundle.generation_time_seconds + result.training_time_seconds
+                teacher_bundle.generation_time_seconds + endpoint_metric_time_seconds + result.training_time_seconds
             ),
             "evaluation_time_seconds": evaluation_time_seconds,
             "total_run_time_seconds": time.time() - run_start_time,

@@ -37,7 +37,7 @@ model:
     latent_dim: 256
     context_feature_dim: 128
     tensor_rank: 64
-    lambda_ae: 1.0
+    lambda_ae: 0.2
     lambda_lat: 1.0
     lambda_end: 1.0
     state_network:
@@ -125,7 +125,7 @@ teacher:
   auto_train_if_missing: true
   generate_trajectories: true
   num_samples: 100000
-  num_context: 2000
+  num_context: 50000
   batch_size: 64
   cache_trajectories: true
   load_cached_trajectories: true
@@ -184,7 +184,7 @@ training:
     early_stopping: true
     patience: 20
     early_stopping_min_delta: 0.001
-    gradient_clip_norm: 5.0
+    gradient_clip_norm: null
     precision: "float32"
     use_tensorboard: true
     optimizer:

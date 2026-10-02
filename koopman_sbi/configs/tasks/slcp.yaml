@@ -1,0 +1,3 @@
+task:
+  name: slcp
+  dataset_dir: logs/slcp/shared/dataset_v2

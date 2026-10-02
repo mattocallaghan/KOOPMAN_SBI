@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 from typing import Iterable
 
-import sbibm
+from koopman_sbi.tasks import get_task
 import torch
 
 from koopman_sbi.config import ExperimentConfig, load_experiment_config, resolve_task_config_path
@@ -24,7 +24,7 @@ def _resolve_config_argument(args: argparse.Namespace) -> str:
 
 
 def _infer_dimensions(task_name: str) -> tuple[int, int]:
-    task = sbibm.get_task(task_name)
+    task = get_task(task_name)
     prior_sample = task.get_prior()(1).float()
     observation = task.get_observation(num_observation=1).float()
     theta_dim = int(prior_sample.shape[-1])

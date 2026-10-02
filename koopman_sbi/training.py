@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import shutil
 import time
 from dataclasses import dataclass
@@ -146,7 +147,6 @@ class Trainer:
     def fit(self, train_loader: DataLoader, val_loader: DataLoader) -> TrainingResult:
         fit_start_time = time.time()
         best_val_loss = float("inf")
-        epochs_without_improvement = 0
         history: List[Dict[str, float]] = []
         best_checkpoint_path = self.run_paths.checkpoints_dir / "best_model.pt"
 
@@ -155,6 +155,21 @@ class Trainer:
             train_metrics = self._run_epoch(train_loader, train=True)
             val_metrics = self._run_epoch(val_loader, train=False)
             epoch_time = time.time() - start_time
+
+            nonfinite_metrics = {
+                name: value
+                for name, value in {
+                    **{f"train_{key}": value for key, value in train_metrics.items()},
+                    **{f"val_{key}": value for key, value in val_metrics.items()},
+                }.items()
+                if not math.isfinite(value)
+            }
+            if nonfinite_metrics:
+                raise FloatingPointError(
+                    "Training produced non-finite metrics at "
+                    f"epoch {epoch}: {nonfinite_metrics}. "
+                    "Adjust the model architecture or optimization settings before retrying."
+                )
 
             if isinstance(self.model.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                 self.model.scheduler.step(val_metrics["total_loss"])
@@ -184,28 +199,18 @@ class Trainer:
                 "training",
             )
 
-            improvement_threshold = float(self.training_config.early_stopping_min_delta)
-            has_improved = val_metrics["total_loss"] < (best_val_loss - improvement_threshold)
-            if has_improved:
-                best_val_loss = val_metrics["total_loss"]
-                epochs_without_improvement = 0
+            val_loss = val_metrics["total_loss"]
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
                 self.model.save(str(best_checkpoint_path))
-            else:
-                epochs_without_improvement += 1
 
             print(
                 f"Epoch {epoch}/{self.training_config.epochs} "
-                f"train_total_loss={train_metrics['total_loss']:.4f} "
-                f"val_total_loss={val_metrics['total_loss']:.4f} "
-                f"best_val_loss={best_val_loss:.4f} "
-                f"patience={epochs_without_improvement}/{self.training_config.patience} "
-                f"min_delta={improvement_threshold:.4f} "
+                f"train_total_loss={train_metrics['total_loss']:.4g} "
+                f"val_total_loss={val_loss:.4g} "
+                f"best_val_loss={best_val_loss:.4g} "
                 f"time={epoch_time:.2f}s"
             )
-
-            if self.training_config.early_stopping and epochs_without_improvement >= self.training_config.patience:
-                print(f"Early stopping after epoch {epoch}")
-                break
 
         self._write_history(history)
         self._update_last_model_checkpoint(best_checkpoint_path)

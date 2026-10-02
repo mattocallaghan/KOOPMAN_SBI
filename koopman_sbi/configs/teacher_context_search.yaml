@@ -1,0 +1,14 @@
+# Independent Optuna search: hold the tensor-product model settings fixed and
+# vary only the number of distinct contexts used to generate teacher data.
+output_root: "logs/teacher_context_optuna_search"
+seed: 0
+n_trials: 5
+evaluation_num_posterior_samples: 2000
+
+tasks:
+  - name: "two_moons"
+    config: "tasks/two_moons.yaml"
+  - name: "lotka_volterra"
+    config: "tasks/lotka_volterra.yaml"
+
+num_context: [10000, 30000, 50000, 70000, 100000]

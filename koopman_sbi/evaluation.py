@@ -19,6 +19,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import sbibm
+from koopman_sbi.tasks import get_task, has_reference_posterior
 import torch
 from sbibm.metrics import c2st, ksd, median_distance, mmd, posterior_mean_error, posterior_variance_ratio
 
@@ -97,7 +98,12 @@ def evaluate_model(
     sample_kwargs: Dict[str, Any] | None = None,
     logger: ExperimentLogger | None = None,
 ) -> Dict[str, object]:
-    task = sbibm.get_task(config.task.name)
+    task = get_task(config.task.name)
+    if not has_reference_posterior(task):
+        # No reference posterior (e.g. camera model): compare with the teacher flow and the true image instead.
+        from koopman_sbi.image_evaluation import evaluate_image_model
+
+        return evaluate_image_model(model, model_name, config, dataset_bundle, output_dir, sample_kwargs, logger)
     output_dir.mkdir(parents=True, exist_ok=True)
     plot_dir = output_dir / "plots"
     plot_dir.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,32 @@
+# Optuna proposes configurations adaptively, separately for each task. It
+# minimizes both held-out posterior C2ST and posterior sampling time per
+# generated sample, producing a Pareto set of accuracy/speed tradeoffs. The
+# same trained flow teacher is retained; trajectories are generated once per
+# num_context setting and reused by later trials.
+output_root: "logs/tensorproduct_optuna_search"
+seed: 0
+n_trials: 24
+sampler_startup_trials: 8
+# Posterior-recovery metrics are evaluated against SBIBM reference posteriors
+# for observations never used during training.  Keep this sufficiently large
+# to avoid ranking configurations on sampling noise.
+evaluation_num_posterior_samples: 2000
+
+tasks:
+  - name: "two_moons"
+    config: "tasks/two_moons.yaml"
+  - name: "lotka_volterra"
+    config: "tasks/lotka_volterra.yaml"
+
+# Categorical structural choices. Optuna explores them adaptively instead of
+# evaluating their complete Cartesian product.
+num_context: [50000, 100000]
+# lifting_dim maps to model.tensorproduct_koopman.latent_dim.
+lifting_dim: [128, 256]
+tensor_rank: [64, 128]
+# lambda_end is fixed to one, so the other two are meaningful relative weights.
+# Optuna samples them logarithmically between 0.01 and 1.0.
+loss_weights:
+  lambda_ae: {low: 0.01, high: 1.0, log: true}
+  lambda_lat: {low: 0.01, high: 1.0, log: true}
+  lambda_end: 1.0

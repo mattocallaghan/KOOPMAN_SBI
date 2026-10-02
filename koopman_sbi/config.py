@@ -61,9 +61,33 @@ class TensorProductKoopmanModelConfig:
     latent_dim: int = 256
     context_feature_dim: int = 128
     tensor_rank: int = 64
-    lambda_ae: float = 1.0
-    lambda_lat: float = 1.0
+    lambda_ae: float = 0.2
+    lambda_lat: float = 0.608
     lambda_end: float = 1.0
+    use_time_dependent_consistency: bool = False
+    lambda_cons: float = 1.0
+    # Continuous mode: cap on the spectral norm of the tensor-product generator (so on |eigenvalues|); <= 0 disables.
+    continuous_final_time: float = 1.0
+    # Discrete mode: endpoint loss e^T (I + w M) e = MSE + w * error in the teacher's noise coordinates, with
+    # M = (J J^T + eps I)^-1 normalised to mean trace/d = 1, J = d theta / d noise of the teacher flow from the
+    # variational equation (cached with the trajectories). Applies to the discrete endpoint loss and the
+    # continuous target loss; skipped (with a notice) for full-trajectory batches.
+    pullback_endpoint_metric: bool = True
+    # w: weight of the noise-coordinate term relative to the MSE term.
+    pullback_metric_weight: float = 1.0
+    # eps = (value * median sigma_max(J))^2 caps the weight of very thin posterior directions; 0 = no cap.
+    pullback_metric_epsilon: float = 0.0
+    # How the flow Jacobian J = d theta / d noise enters the metric: "full" (exact J, O(d^2) per pair; low d),
+    # "diagonal" (Hutchinson diag(J J^T), per-dimension posterior spread; O(d)), "trace" (Hutchinson log|det J|,
+    # one isotropic weight per pair; O(1)), "finite_difference_trace" (the trace estimate with a forward
+    # difference instead of a JVP; one forward pass over a doubled batch per step, much cheaper on MPS),
+    # "vjp_sketch" (k adjoint probes J^-T r: an unbiased estimate of the full anisotropic pull-back; O(k d)).
+    jacobian_type: str = "full"
+    # Random probes for "diagonal" and "vjp_sketch" ("trace" variants use one probe per trajectory).
+    hutchinson_probes: int = 4
+    # Solver tolerance for "vjp_sketch" (its own pass; the trajectories keep the teacher's tolerance).
+    vjp_sketch_tolerance: float = 1e-3
+    adversarial: "AdversarialConfig" = field(default_factory=lambda: AdversarialConfig())
 
 
 @dataclass
@@ -167,9 +191,6 @@ class TrainingConfig:
     fit_verbose: int = 2
     num_workers: int = 0
     device: str = "auto"
-    early_stopping: bool = True
-    patience: int = 20
-    early_stopping_min_delta: float = 0.0
     gradient_clip_norm: Optional[float] = None
     precision: str = "float32"
     use_tensorboard: bool = True
@@ -206,6 +227,8 @@ class TeacherConfig:
     num_samples: int = 100000
     num_context: int = 10000
     batch_size: int = 1000
+    store_full_trajectory: bool = False
+    trajectory_steps: int = 16
     cache_trajectories: bool = True
     load_cached_trajectories: bool = True
     trajectory_dir: Optional[str] = None
@@ -306,14 +329,16 @@ class ExperimentConfig:
 
 T = TypeVar("T")
 
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "default.yaml"
 
-def _convert_value(field_type: Any, value: Any) -> Any:
+
+def _convert_value(field_type: Any, value: Any, key_path: str = "") -> Any:
     origin = get_origin(field_type)
     if is_dataclass(field_type):
-        return _build_dataclass(field_type, value)
+        return _build_dataclass(field_type, value, key_path)
     if origin in (list, List):
         inner_type = get_args(field_type)[0]
-        return [_convert_value(inner_type, item) for item in value]
+        return [_convert_value(inner_type, item, f"{key_path}[{index}]") for index, item in enumerate(value)]
     if origin in (dict, Dict):
         key_type, value_type = get_args(field_type)
         return {
@@ -332,22 +357,36 @@ def _convert_value(field_type: Any, value: Any) -> Any:
     return value
 
 
-def _build_dataclass(cls: Type[T], data: Dict[str, Any]) -> T:
+def _build_dataclass(cls: Type[T], data: Dict[str, Any], key_path: str = "") -> T:
     if not isinstance(data, dict):
-        raise TypeError(f"Expected a mapping for {cls.__name__}, got {type(data).__name__}")
+        raise TypeError(f"Expected a mapping for {key_path or cls.__name__}, got {type(data).__name__}")
+    if cls is TensorProductKoopmanModelConfig and "use_full_trajectory" in data:
+        data = dict(data)
+        legacy_value = data.pop("use_full_trajectory")
+        if "use_time_dependent_consistency" not in data or not data["use_time_dependent_consistency"]:
+            data["use_time_dependent_consistency"] = legacy_value
+
+    prefix = f"{key_path}." if key_path else ""
+    known_fields = {field.name for field in fields(cls)}
+    unknown_keys = sorted(str(key) for key in data if key not in known_fields)
+    if unknown_keys:
+        raise ValueError(
+            f"Unknown config key(s) {', '.join(prefix + key for key in unknown_keys)}; "
+            f"valid keys for {cls.__name__}: {', '.join(sorted(known_fields))}"
+        )
 
     values: Dict[str, Any] = {}
     type_hints = get_type_hints(cls)
     for field in fields(cls):
         field_type = type_hints.get(field.name, field.type)
         if field.name in data:
-            values[field.name] = _convert_value(field_type, data[field.name])
+            values[field.name] = _convert_value(field_type, data[field.name], prefix + field.name)
         elif field.default is not MISSING:
             values[field.name] = field.default
         elif field.default_factory is not MISSING:  # type: ignore[attr-defined]
             values[field.name] = field.default_factory()  # type: ignore[misc]
         else:
-            raise ValueError(f"Missing required config field: {cls.__name__}.{field.name}")
+            raise ValueError(f"Missing required config field: {prefix}{field.name}")
     return cls(**values)
 
 
@@ -381,7 +420,11 @@ def _load_raw_config(path: Path) -> Dict[str, Any]:
 
 
 def load_experiment_config(path: str) -> ExperimentConfig:
-    raw_config = _load_raw_config(Path(path))
+    """Load a config layered as `configs/default.yaml` <- base_config chain <- `path`."""
+    config_path = Path(path).resolve()
+    raw_config = _load_raw_config(config_path)
+    if config_path != DEFAULT_CONFIG_PATH:
+        raw_config = _deep_merge_config(_load_raw_config(DEFAULT_CONFIG_PATH), raw_config)
     return _build_dataclass(ExperimentConfig, raw_config)
 
 

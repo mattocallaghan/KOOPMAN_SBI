@@ -1,0 +1,3 @@
+task:
+  name: slcp_distractors
+  dataset_dir: logs/slcp_distractors/shared/dataset_v2
