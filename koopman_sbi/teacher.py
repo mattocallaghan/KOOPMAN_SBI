@@ -75,9 +75,6 @@ _JACOBIAN_METADATA_FILENAME = "endpoint_jacobian_metadata.json"
 JACOBIAN_TYPES = ("full", "diagonal", "trace", "finite_difference_trace", "vjp_sketch")
 # Types computed in the same solve as the trajectories; "vjp_sketch" runs as its own pass at its own tolerance.
 _SINGLE_SOLVE_TYPES = ("full", "diagonal", "trace", "finite_difference_trace")
-# Cap on pairs per chunk for "vjp_sketch": its batched VJPs through large networks need ~19 GB per 512 pairs
-# for the camera U-Net on MPS.
-_VJP_SKETCH_MAX_CHUNK = 512
 # Forward-difference step for "finite_difference_trace" (theta is standardised, so O(1) in scale).
 _FINITE_DIFFERENCE_STEP = 1e-3
 
@@ -119,8 +116,6 @@ def _teacher_flow_sensitivity(
     dim = noise.shape[1]
     ode_options = {"dtype": torch.float32} if device.type == "mps" else {}
     generator = torch.Generator().manual_seed(seed)
-    if jacobian_type == "vjp_sketch":
-        chunk_size = min(chunk_size, _VJP_SKETCH_MAX_CHUNK)
     outputs, endpoints = [], []
     teacher_model.eval()
     pass_start = time.time()
@@ -284,6 +279,7 @@ def attach_pullback_endpoint_metric(
     probes: int = 4,
     sketch_tolerance: float = 1e-3,
     chunk_size: int = 8192,
+    sketch_batch_size: int = 512,
 ) -> float:
     """Give each teacher pair the endpoint metric I + weight * M, with M the (normalised) pull-back of the flow.
 
@@ -304,7 +300,14 @@ def attach_pullback_endpoint_metric(
         raise ValueError(f"tensorproduct_koopman.jacobian_type must be one of {JACOBIAN_TYPES}, got {jacobian_type!r}.")
     start_time = time.time()
     all_values = _cached_flow_sensitivity(
-        teacher_bundle, teacher_model, device, jacobian_type, probes, tolerance=sketch_tolerance, chunk_size=chunk_size
+        teacher_bundle,
+        teacher_model,
+        device,
+        jacobian_type,
+        probes,
+        tolerance=sketch_tolerance,
+        # vjp_sketch's batched VJPs need far more memory per pair than a plain solve, so it has its own batch size.
+        chunk_size=sketch_batch_size if jacobian_type == "vjp_sketch" else chunk_size,
     )
     train_values = all_values[teacher_bundle.train_dataset.source_indices]
     val_values = all_values[teacher_bundle.val_dataset.source_indices]

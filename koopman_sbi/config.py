@@ -87,6 +87,9 @@ class TensorProductKoopmanModelConfig:
     hutchinson_probes: int = 4
     # Solver tolerance for "vjp_sketch" (its own pass; the trajectories keep the teacher's tolerance).
     vjp_sketch_tolerance: float = 1e-3
+    # Pairs per chunk in the vjp_sketch pass (memory-bound: ~19 GB per 512 pairs for the camera U-Net on MPS,
+    # ~6.5 GB on an A100). Not part of the cache key, so it can be changed without regenerating trajectories.
+    vjp_sketch_batch_size: int = 512
     adversarial: "AdversarialConfig" = field(default_factory=lambda: AdversarialConfig())
 
 

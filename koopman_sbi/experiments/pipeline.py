@@ -396,6 +396,7 @@ def run_train_tensorproduct_koopman(config_path: str) -> ExperimentArtifacts:
                 jacobian_type=config.model.tensorproduct_koopman.jacobian_type,
                 probes=config.model.tensorproduct_koopman.hutchinson_probes,
                 sketch_tolerance=config.model.tensorproduct_koopman.vjp_sketch_tolerance,
+                sketch_batch_size=config.model.tensorproduct_koopman.vjp_sketch_batch_size,
                 # A separate pass (fallback or vjp_sketch) uses the same batch size as trajectory generation.
                 chunk_size=config.teacher.batch_size,
             )

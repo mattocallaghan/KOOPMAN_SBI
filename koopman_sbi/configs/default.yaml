@@ -82,6 +82,7 @@ model:
     jacobian_type: full
     hutchinson_probes: 4
     vjp_sketch_tolerance: 0.001
+    vjp_sketch_batch_size: 512
     # continuous time
     use_time_dependent_consistency: false
     lambda_cons: 1.0

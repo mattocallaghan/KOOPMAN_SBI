@@ -32,6 +32,8 @@ model:
     # One probe: unbiased, noisy per pair (corr ~0.5) but ~4% error averaged over a 512-pair batch; ~3x faster.
     hutchinson_probes: 1
     vjp_sketch_tolerance: 0.001
+    # A100 (40 GB): 512 pairs used ~6.5 GB, so 2048 should fit (~25 GB). On the M5 Pro (MPS) use 512 (~19 GB).
+    vjp_sketch_batch_size: 2048
     # Floor on the local width for the trace/diagonal types (not used by vjp_sketch, which inverts nothing).
     pullback_metric_epsilon: 0.05
 teacher:
