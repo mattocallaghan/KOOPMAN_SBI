@@ -42,7 +42,13 @@ teacher:
   trajectory_dir: logs/camera_model/shared/teacher_trajectories_300k
 training:
   flow_matching:
-    epochs: 10
+    # Sized for an A100 (40 GB): 8x the batch, ~2x the learning rate (sqrt(8) ~ 2.8x, capped without warm-up),
+    # gradient clipping for the early steps, and enough epochs for ~12k optimiser steps (59 steps/epoch).
+    batch_size: 4096
+    epochs: 200
+    gradient_clip_norm: 1.0
+    optimizer:
+      lr: 0.002
   tensorproduct_koopman:
     # 250 epochs plateaued by ~150 (the plateau scheduler had decayed the learning rate to ~1e-8).
     epochs: 150
