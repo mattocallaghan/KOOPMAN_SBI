@@ -23,6 +23,24 @@ IMAGE_SIDE = 28
 PSF_WIDTH = 3.0
 DEFAULT_EMNIST_ROOT = Path("logs/shared/emnist")
 _OBSERVATIONS_PATH = Path(__file__).parent / "data" / "camera_model_observations.npz"
+# The 12 held-out test pairs of the original experiment, used to rebuild _OBSERVATIONS_PATH when it is missing.
+_OBSERVATIONS_URL = (
+    "https://raw.githubusercontent.com/mackelab/gatsbi/main/plotting_code/plotting_data/camera_samples.npz"
+)
+
+
+def _download_observations(path: Path) -> None:
+    """Fetch the original experiment's test pairs and save the true images and observations (12 x 784 each)."""
+    import io
+    import urllib.request
+
+    print(f"[camera_model] {path} not found; downloading the test observations from {_OBSERVATIONS_URL}", flush=True)
+    with urllib.request.urlopen(_OBSERVATIONS_URL, timeout=120) as response:
+        archive = np.load(io.BytesIO(response.read()))
+    theta = archive["theta_test"].astype(np.float32).reshape(-1, IMAGE_SIDE * IMAGE_SIDE)
+    x = archive["obs_test"].astype(np.float32).reshape(-1, IMAGE_SIDE * IMAGE_SIDE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, theta=theta, x=x)
 
 
 def poisson_noise(images: torch.Tensor, generator: Optional[torch.Generator] = None) -> torch.Tensor:
@@ -95,6 +113,8 @@ class CameraModelTask:
     def __init__(self, emnist_root: Path = DEFAULT_EMNIST_ROOT) -> None:
         self.emnist_root = Path(emnist_root)
         self._images: Optional[torch.Tensor] = None
+        if not _OBSERVATIONS_PATH.exists():
+            _download_observations(_OBSERVATIONS_PATH)
         observations = np.load(_OBSERVATIONS_PATH)
         self._true_parameters = torch.from_numpy(observations["theta"])
         self._observations = torch.from_numpy(observations["x"])

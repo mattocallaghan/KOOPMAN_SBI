@@ -186,3 +186,5 @@ checkpoints/
 *.jpg
 *.jpeg
 logs/
+# Small task data shipped with the package (e.g. the camera model test observations).
+!koopman_sbi/tasks/data/*.npz
