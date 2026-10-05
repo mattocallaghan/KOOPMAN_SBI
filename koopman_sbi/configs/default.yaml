@@ -19,6 +19,8 @@ model:
       theta_with_glu: false
       context_with_glu: false
       type: DenseResidualNet
+      downsample: true
+      projection_rank: 0
     sigma_min: 0.0001
     time_prior_exponent: 4.0
     integration_steps: null
@@ -33,6 +35,8 @@ model:
       theta_with_glu: false
       context_with_glu: false
       type: DenseResidualNet
+      downsample: true
+      projection_rank: 0
     lifting_dim: 256
     lambda_rec: 1.0
     lambda_lat: 1.0
@@ -53,6 +57,8 @@ model:
       theta_with_glu: false
       context_with_glu: false
       type: DenseResidualNet
+      downsample: true
+      projection_rank: 0
     context_network:
       hidden_dims: [256, 256]
       activation: gelu
@@ -61,6 +67,8 @@ model:
       theta_with_glu: false
       context_with_glu: false
       type: DenseResidualNet
+      downsample: true
+      projection_rank: 0
     decoder_network:
       hidden_dims: [256, 256, 256]
       activation: gelu
@@ -69,6 +77,8 @@ model:
       theta_with_glu: false
       context_with_glu: false
       type: DenseResidualNet
+      downsample: true
+      projection_rank: 0
     latent_dim: 256
     context_feature_dim: 128
     tensor_rank: 128
@@ -104,6 +114,8 @@ model:
       theta_with_glu: false
       context_with_glu: false
       type: DenseResidualNet
+      downsample: true
+      projection_rank: 0
     backend: normflows
     num_coupling_layers: 4
     transform: affine
@@ -122,6 +134,8 @@ model:
       theta_with_glu: false
       context_with_glu: false
       type: DenseResidualNet
+      downsample: true
+      projection_rank: 0
     backend: normflows
     num_coupling_layers: 2
     transform: neural_spline
@@ -140,6 +154,8 @@ model:
       theta_with_glu: false
       context_with_glu: false
       type: DenseResidualNet
+      downsample: true
+      projection_rank: 0
     backend: native
     eps: 0.001
     t_max: 80.0

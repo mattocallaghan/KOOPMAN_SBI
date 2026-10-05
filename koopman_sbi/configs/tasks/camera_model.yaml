@@ -13,15 +13,29 @@ model:
       type: ConvUNet
       hidden_dims: [32, 64, 128]
   tensorproduct_koopman:
+    # Koopman lift well above the 784-dim noise/theta: the 256-dim latent capped how much of the teacher's
+    # fine-detail variation the student could track (correlation fell to ~0.1 beyond ~250 directions).
+    latent_dim: 2048
+    context_feature_dim: 2048
+    tensor_rank: 256
+    # Full resolution throughout (no stride-2 pooling). Widths narrow to 2 channels at the flatten and the
+    # flatten <-> 2048 maps are factored through 512 (1568 -> 512 -> 2048, ~1.85M each instead of ~6.4M),
+    # so the latent varies in at most 512 directions per observation (the teacher needs ~250 for 99.9%).
     state_network:
       type: ConvEncoder
-      hidden_dims: [32, 64, 128]
+      hidden_dims: [32, 32, 2]
+      downsample: false
+      projection_rank: 512
     context_network:
       type: ConvEncoder
-      hidden_dims: [32, 64, 128]
+      hidden_dims: [32, 32, 2]
+      downsample: false
+      projection_rank: 512
     decoder_network:
       type: ConvDecoder
-      hidden_dims: [128, 64, 32]
+      hidden_dims: [2, 32, 32]
+      downsample: false
+      projection_rank: 512
     # The full flow Jacobian is 784 x 784 per teacher pair (~245 GB for 100k pairs); use a Hutchinson estimate:
     # "trace" = one isotropic weight per pair from log|det J|; "diagonal" = per-pixel posterior spread.
     pullback_endpoint_metric: true

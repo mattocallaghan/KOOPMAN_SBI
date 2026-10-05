@@ -16,6 +16,10 @@ class NetworkConfig:
     theta_with_glu: bool = False
     context_with_glu: bool = False
     type: str = "DenseResidualNet"
+    # ConvEncoder/ConvDecoder only: False keeps every level at full resolution (no stride-2 pooling).
+    downsample: bool = True
+    # ConvEncoder/ConvDecoder only: > 0 factors the flatten <-> feature linear map through this many dimensions.
+    projection_rank: int = 0
 
 
 @dataclass

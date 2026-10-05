@@ -55,6 +55,8 @@ def _network_config_to_dict(config: NetworkConfig) -> Dict[str, object]:
         "theta_with_glu": config.theta_with_glu,
         "context_with_glu": config.context_with_glu,
         "type": config.type,
+        "downsample": config.downsample,
+        "projection_rank": config.projection_rank,
     }
 
 
@@ -97,7 +99,10 @@ class TensorProductKoopmanFlow(BasePosteriorModel):
         state_input_dim = input_dim + 1 if model_config.use_time_dependent_consistency else input_dim
 
         if state_cfg.type == "ConvEncoder":
-            self.state_encoder = ConvEncoder(state_input_dim, latent_dim, state_cfg.hidden_dims, num_pixels=input_dim)
+            self.state_encoder = ConvEncoder(
+                state_input_dim, latent_dim, state_cfg.hidden_dims, num_pixels=input_dim, downsample=state_cfg.downsample,
+                projection_rank=state_cfg.projection_rank,
+            )
         elif state_cfg.type == "DenseResidualNet":
             self.state_encoder = DenseResidualNet(
                 input_dim=state_input_dim,
@@ -112,7 +117,14 @@ class TensorProductKoopmanFlow(BasePosteriorModel):
         else:
             raise ValueError(f"Unsupported tensorproduct_koopman network type: {state_cfg.type!r}")
         if context_cfg.type == "ConvEncoder":
-            self.context_encoder = ConvEncoder(context_dim, context_feature_dim, context_cfg.hidden_dims, num_pixels=context_dim)
+            self.context_encoder = ConvEncoder(
+                context_dim,
+                context_feature_dim,
+                context_cfg.hidden_dims,
+                num_pixels=context_dim,
+                downsample=context_cfg.downsample,
+                projection_rank=context_cfg.projection_rank,
+            )
         elif context_cfg.type == "DenseResidualNet":
             self.context_encoder = DenseResidualNet(
                 input_dim=context_dim,
@@ -127,7 +139,13 @@ class TensorProductKoopmanFlow(BasePosteriorModel):
         else:
             raise ValueError(f"Unsupported tensorproduct_koopman network type: {context_cfg.type!r}")
         if decoder_cfg.type == "ConvDecoder":
-            self.decoder = ConvDecoder(latent_dim, input_dim, decoder_cfg.hidden_dims)
+            self.decoder = ConvDecoder(
+                latent_dim,
+                input_dim,
+                decoder_cfg.hidden_dims,
+                downsample=decoder_cfg.downsample,
+                projection_rank=decoder_cfg.projection_rank,
+            )
         elif decoder_cfg.type == "DenseResidualNet":
             self.decoder = DenseResidualNet(
                 input_dim=latent_dim,

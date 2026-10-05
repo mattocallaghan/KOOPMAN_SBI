@@ -22,6 +22,13 @@ def image_side(num_pixels: int) -> int:
     return side
 
 
+def _linear(in_features: int, out_features: int, rank: int = 0) -> nn.Module:
+    """Dense map, or (rank > 0) factored through `rank` dimensions: in -> rank -> out (fewer parameters)."""
+    if rank <= 0 or rank >= min(in_features, out_features):
+        return nn.Linear(in_features, out_features)
+    return nn.Sequential(nn.Linear(in_features, rank, bias=False), nn.Linear(rank, out_features))
+
+
 def _group_norm(channels: int) -> nn.GroupNorm:
     return nn.GroupNorm(num_groups=min(8, channels), num_channels=channels)
 
@@ -115,9 +122,19 @@ class ConvEncoder(nn.Module):
     """Image (optionally with leading scalar inputs, e.g. time) -> feature vector.
 
     input_dim = extra + side^2: the first `extra` values are broadcast as constant channels.
+    With downsample=False every level stays at full resolution (no stride-2 steps), so no per-pixel detail is
+    pooled away before the linear map to the feature vector; keep the last width small (e.g. 4) to bound it.
     """
 
-    def __init__(self, input_dim: int, output_dim: int, hidden_dims: List[int], num_pixels: int) -> None:
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        hidden_dims: List[int],
+        num_pixels: int,
+        downsample: bool = True,
+        projection_rank: int = 0,
+    ) -> None:
         super().__init__()
         self.side = image_side(num_pixels)
         self.num_extra = input_dim - num_pixels
@@ -127,12 +144,12 @@ class ConvEncoder(nn.Module):
         previous = 1 + self.num_extra
         side = self.side
         for index, width in enumerate(hidden_dims):
-            stride = 1 if index == 0 else 2
+            stride = 2 if (downsample and index > 0) else 1
             layers += [nn.Conv2d(previous, width, 3, stride=stride, padding=1), _group_norm(width), nn.SiLU()]
             previous = width
             side = side if stride == 1 else (side + 1) // 2
         self.features = nn.Sequential(*layers)
-        self.head = nn.Linear(previous * side * side, output_dim)
+        self.head = _linear(previous * side * side, output_dim, projection_rank)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         extra, pixels = x[:, :self.num_extra], x[:, self.num_extra:]
@@ -143,17 +160,28 @@ class ConvEncoder(nn.Module):
 
 
 class ConvDecoder(nn.Module):
-    """Feature vector -> image (flat). hidden_dims run from the coarsest to the finest resolution."""
+    """Feature vector -> image (flat). hidden_dims run from the coarsest to the finest resolution.
 
-    def __init__(self, input_dim: int, output_dim: int, hidden_dims: List[int]) -> None:
+    With downsample=False the latent is projected straight to hidden_dims[0] channels at full resolution and all
+    blocks stay there (no upsampling); keep hidden_dims[0] small (e.g. 4) to bound the projection.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        hidden_dims: List[int],
+        downsample: bool = True,
+        projection_rank: int = 0,
+    ) -> None:
         super().__init__()
         self.side = image_side(output_dim)
         self.levels = len(hidden_dims)
         self.base_side = self.side
-        for _ in range(self.levels - 1):
+        for _ in range(self.levels - 1 if downsample else 0):
             self.base_side = (self.base_side + 1) // 2
         self.base_channels = hidden_dims[0]
-        self.project = nn.Linear(input_dim, hidden_dims[0] * self.base_side * self.base_side)
+        self.project = _linear(input_dim, hidden_dims[0] * self.base_side * self.base_side, projection_rank)
         self.blocks = nn.ModuleList()
         previous = hidden_dims[0]
         for width in hidden_dims:
@@ -164,7 +192,7 @@ class ConvDecoder(nn.Module):
         side = self.side
         for _ in range(self.levels):
             self._sizes.append(side)
-            side = (side + 1) // 2
+            side = (side + 1) // 2 if downsample else side
         self._sizes.reverse()
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
